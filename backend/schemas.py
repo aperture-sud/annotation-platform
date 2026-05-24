@@ -10,6 +10,7 @@ class BoxCreate(BaseModel):
     y: float
     width: float
     height: float
+    rotation: Optional[float] = None
     tag_category: Optional[str] = None
     tag_data: Optional[str] = None
     content_text: Optional[str] = None
@@ -23,6 +24,7 @@ class BoxUpdate(BaseModel):
     y: Optional[float] = None
     width: Optional[float] = None
     height: Optional[float] = None
+    rotation: Optional[float] = None
     tag_category: Optional[str] = None
     tag_data: Optional[str] = None
     content_text: Optional[str] = None

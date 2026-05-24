@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { TAG_SCHEMAS } from '../tags/tagSchemas.js';
 import { updateBox } from '../api/client.js';
+import MathKeyboard from './MathKeyboard.jsx';
 
 const S = {
   form: { padding: '12px', fontSize: '13px' },
@@ -31,12 +32,13 @@ const S = {
   saved: { color: '#4CAF50', fontSize: '12px', marginTop: '4px', textAlign: 'center' },
 };
 
-function FieldRenderer({ field, value, onChange }) {
+function FieldRenderer({ field, value, onChange, textareaRef }) {
   if (field.type === 'textarea') {
     return (
       <div style={S.fieldWrapper}>
         <label style={S.label}>{field.label}{field.required ? ' *' : ''}</label>
         <textarea
+          ref={textareaRef}
           style={S.textarea}
           value={value ?? ''}
           onChange={(e) => onChange(e.target.value)}
@@ -100,8 +102,27 @@ export default function TagForm({ box, onUpdate }) {
   const [confidence, setConfidence] = useState('high');
   const [saving, setSaving] = useState(false);
   const [savedMsg, setSavedMsg] = useState(false);
+  const mathTextareaRef = useRef(null);
+  const isMathTag = box?.tag_category === 'math_inline' || box?.tag_category === 'math_block';
 
-  // Reset form when box changes
+  const insertMath = useCallback((latex, cursorOffset) => {
+    const ta = mathTextareaRef.current;
+    if (!ta) return;
+    const start = ta.selectionStart;
+    const end = ta.selectionEnd;
+    const current = ta.value;
+    const newVal = current.slice(0, start) + latex + current.slice(end);
+    // Update state
+    setField('content', newVal);
+    // Move cursor: after insertion + offset (negative = go back N chars)
+    requestAnimationFrame(() => {
+      const pos = start + latex.length + (cursorOffset || 0);
+      ta.focus();
+      ta.setSelectionRange(pos, pos);
+    });
+  }, []);
+
+  // Reset form data when box changes
   useEffect(() => {
     if (!box) return;
     try {
@@ -109,10 +130,16 @@ export default function TagForm({ box, onUpdate }) {
     } catch {
       setFormData({});
     }
-    setReadingOrder(box.reading_order ?? '');
     setConfidence(box.confidence || 'high');
     setSavedMsg(false);
   }, [box?.id]);
+
+  // Keep reading order in sync whenever it's assigned (e.g. auto-assigned after creation)
+  useEffect(() => {
+    if (box?.reading_order != null) {
+      setReadingOrder(box.reading_order);
+    }
+  }, [box?.reading_order]);
 
   if (!box || !schema) {
     return <div style={{ padding: '12px', color: '#888', fontSize: '13px' }}>Unknown tag: {box?.tag_category}</div>;
@@ -133,7 +160,7 @@ export default function TagForm({ box, onUpdate }) {
         tag_category: box.tag_category,
         tag_data: JSON.stringify(formData),
         content_text: content,
-        reading_order: readingOrder !== '' ? Number(readingOrder) : null,
+        reading_order: readingOrder !== '' ? Number(readingOrder) : (box.reading_order ?? null),
         confidence,
       });
       onUpdate(updated);
@@ -185,8 +212,12 @@ export default function TagForm({ box, onUpdate }) {
           field={field}
           value={formData[field.name] ?? (field.type === 'boolean' ? false : '')}
           onChange={(v) => setField(field.name, v)}
+          textareaRef={isMathTag && field.name === 'content' ? mathTextareaRef : null}
         />
       ))}
+
+      {/* Math keyboard for math tags */}
+      {isMathTag && <MathKeyboard onInsert={insertMath} />}
 
       {/* Illegible shortcut for text content tags */}
       {hasContentField && (

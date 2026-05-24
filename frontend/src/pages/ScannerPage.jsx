@@ -141,6 +141,67 @@ async function getCroppedBlob(imageSrc, pixelCrop, rotation, brightness, contras
   );
 }
 
+// ── Polygon → min-bounding-rect helpers ──────────────────────────────────────
+
+function convexHullPts(pts) {
+  if (pts.length < 3) return pts;
+  const sorted = [...pts].sort((a, b) => a[0] !== b[0] ? a[0] - b[0] : a[1] - b[1]);
+  const cross = (o, a, b) => (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0]);
+  const lower = [];
+  for (const p of sorted) {
+    while (lower.length >= 2 && cross(lower[lower.length-2], lower[lower.length-1], p) <= 0) lower.pop();
+    lower.push(p);
+  }
+  const upper = [];
+  for (let i = sorted.length-1; i >= 0; i--) {
+    const p = sorted[i];
+    while (upper.length >= 2 && cross(upper[upper.length-2], upper[upper.length-1], p) <= 0) upper.pop();
+    upper.push(p);
+  }
+  upper.pop(); lower.pop();
+  return lower.concat(upper);
+}
+
+// Returns 4 corners of min bounding rect: [TL, TR, BR, BL] in image pixel coords
+function polyTo4Corners(pts) {
+  const hull = convexHullPts(pts);
+  if (hull.length < 2) return null;
+  const n = hull.length;
+  let minArea = Infinity, best = null;
+
+  for (let i = 0; i < n; i++) {
+    const a = hull[i], b = hull[(i+1)%n];
+    const edgeDx = b[0]-a[0], edgeDy = b[1]-a[1];
+    const edgeLen = Math.hypot(edgeDx, edgeDy);
+    if (edgeLen === 0) continue;
+    const ux = edgeDx/edgeLen, uy = edgeDy/edgeLen;
+    let minU=Infinity, maxU=-Infinity, minV=Infinity, maxV=-Infinity;
+    for (const p of hull) {
+      const dx=p[0]-a[0], dy=p[1]-a[1];
+      const u=dx*ux+dy*uy, v=dx*(-uy)+dy*ux;
+      if (u<minU) minU=u; if (u>maxU) maxU=u;
+      if (v<minV) minV=v; if (v>maxV) maxV=v;
+    }
+    const area = (maxU-minU)*(maxV-minV);
+    if (area < minArea) {
+      minArea = area;
+      // Centre of the rect
+      const midU=(minU+maxU)/2, midV=(minV+maxV)/2;
+      const cx = a[0]+midU*ux+midV*(-uy);
+      const cy = a[1]+midU*uy+midV*ux;
+      const hw=(maxU-minU)/2, hh=(maxV-minV)/2;
+      // 4 corners in TL, TR, BR, BL order
+      best = [
+        [cx - hw*ux - hh*(-uy), cy - hw*uy - hh*ux], // TL
+        [cx + hw*ux - hh*(-uy), cy + hw*uy - hh*ux], // TR
+        [cx + hw*ux + hh*(-uy), cy + hw*uy + hh*ux], // BR
+        [cx - hw*ux + hh*(-uy), cy - hw*uy + hh*ux], // BL
+      ];
+    }
+  }
+  return best;
+}
+
 // ── Styles ────────────────────────────────────────────────────────────────────
 
 const S = {
@@ -205,12 +266,17 @@ export default function ScannerPage() {
   const [contrast, setContrast] = useState(20);
 
   // Perspective mode state
-  // corners: [[x,y],…] in DISPLAY-fraction space (0–1 of the image's displayed area)
   const [perspCorners, setPerspCorners] = useState([[0.05,0.05],[0.95,0.05],[0.95,0.95],[0.05,0.95]]);
-  const perspDraggingRef = useRef(null); // index of handle being dragged
+  const perspDraggingRef = useRef(null);
   const perspImgAreaRef = useRef(null);
   const perspImgRef = useRef(null);
   const [perspProcessing, setPerspProcessing] = useState(false);
+
+  // Polygon crop mode state
+  const [polyPts, setPolyPts] = useState([]); // [[fx,fy],…] in display-fraction space
+  const polyImgAreaRef = useRef(null);
+  const polyImgRef = useRef(null);
+  const [polyProcessing, setPolyProcessing] = useState(false);
 
   const [uploading, setUploading] = useState(false);
   const cameraRef = useRef(null);
@@ -228,7 +294,75 @@ export default function ScannerPage() {
     setBrightness(0);
     setContrast(20);
     setPerspCorners([[0.05,0.05],[0.95,0.05],[0.95,0.95],[0.05,0.95]]);
+    setPolyPts([]);
     setMode('edit');
+  }
+
+  // Polygon crop helpers
+  function getPolyImageDisplayRect() {
+    const container = polyImgAreaRef.current;
+    const img = polyImgRef.current;
+    if (!container || !img) return null;
+    const cw = container.clientWidth, ch = container.clientHeight;
+    const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
+    if (!iw || !ih) return null;
+    const scale = Math.min(cw/iw, ch/ih);
+    return { x: (cw-iw*scale)/2, y: (ch-ih*scale)/2, w: iw*scale, h: ih*scale };
+  }
+
+  function svgToPolyFrac(svgX, svgY) {
+    const r = getPolyImageDisplayRect();
+    if (!r) return null;
+    return [
+      Math.max(0, Math.min(1, (svgX - r.x) / r.w)),
+      Math.max(0, Math.min(1, (svgY - r.y) / r.h)),
+    ];
+  }
+
+  function polyFracToSVG([fx, fy]) {
+    const r = getPolyImageDisplayRect();
+    if (!r) return [0, 0];
+    return [r.x + fx * r.w, r.y + fy * r.h];
+  }
+
+  function handlePolySvgClick(e) {
+    const svg = e.currentTarget;
+    const rect = svg.getBoundingClientRect();
+    const svgX = e.clientX - rect.left;
+    const svgY = e.clientY - rect.top;
+    const pt = svgToPolyFrac(svgX, svgY);
+    if (!pt) return;
+
+    // Close if clicking near first point (>= 3 pts placed)
+    if (polyPts.length >= 3) {
+      const [f0x, f0y] = polyFracToSVG(polyPts[0]);
+      const dist = Math.hypot(svgX - f0x, svgY - f0y);
+      if (dist < 15) { applyPolyCrop(); return; }
+    }
+    setPolyPts((prev) => [...prev, pt]);
+  }
+
+  async function applyPolyCrop() {
+    if (polyPts.length < 3 || !imageSrc) return;
+    setPolyProcessing(true);
+    try {
+      const img = polyImgRef.current || await createImageEl(imageSrc);
+      const iw = img.naturalWidth, ih = img.naturalHeight;
+      // Convert fraction points to image pixel coords
+      const pxPts = polyPts.map(([fx, fy]) => [fx * iw, fy * ih]);
+      const corners = polyTo4Corners(pxPts);
+      if (!corners) throw new Error('Could not compute bounding rectangle');
+      const blob = await perspectiveWarp(imageSrc, corners);
+      const newUrl = URL.createObjectURL(blob);
+      setImageSrc(newUrl);
+      setPolyPts([]);
+      setMode('edit');
+    } catch (e) {
+      console.error('Polygon crop failed', e);
+      alert('Polygon crop failed: ' + e.message);
+    } finally {
+      setPolyProcessing(false);
+    }
   }
 
   function handleCameraChange(e) { resetEditState(e.target.files[0]); e.target.value = ''; }
@@ -286,6 +420,7 @@ export default function ScannerPage() {
     setCrop({ x: 0, y: 0 }); setZoom(1); setRotation(0);
     setCroppedAreaPixels(null); setBrightness(0); setContrast(20);
     setPerspCorners([[0.05,0.05],[0.95,0.05],[0.95,0.95],[0.05,0.95]]);
+    setPolyPts([]);
     setEditingIdx(idx);
     setMode('edit');
   }
@@ -518,6 +653,63 @@ export default function ScannerPage() {
         </div>
       )}
 
+      {/* ── POLYGON CROP MODE ── */}
+      {mode === 'polygon' && imageSrc && (
+        <div style={S.perspRoot}>
+          <div ref={polyImgAreaRef} style={S.perspImgArea}>
+            <img ref={polyImgRef} src={imageSrc} style={S.perspImg} alt="polygon crop" draggable={false} />
+            <svg
+              style={{ ...S.perspSvg, cursor: 'crosshair' }}
+              onClick={handlePolySvgClick}
+            >
+              {/* Polygon outline */}
+              {polyPts.length >= 2 && (
+                <polyline
+                  points={polyPts.map((p) => polyFracToSVG(p).join(',')).join(' ')}
+                  fill="none" stroke="#E91E63" strokeWidth="2" strokeDasharray="6 3"
+                />
+              )}
+              {/* Closing line preview when >= 3 pts */}
+              {polyPts.length >= 3 && (() => {
+                const first = polyFracToSVG(polyPts[0]);
+                const last = polyFracToSVG(polyPts[polyPts.length - 1]);
+                return <line x1={last[0]} y1={last[1]} x2={first[0]} y2={first[1]} stroke="#E91E63" strokeWidth="1.5" strokeDasharray="4 4" opacity={0.5} />;
+              })()}
+              {/* Vertex dots */}
+              {polyPts.map((p, i) => {
+                const [cx, cy] = polyFracToSVG(p);
+                return (
+                  <circle key={i} cx={cx} cy={cy} r={i === 0 ? 8 : 5}
+                    fill={i === 0 ? '#E91E63' : '#fff'} stroke="#E91E63" strokeWidth="2" />
+                );
+              })}
+            </svg>
+          </div>
+
+          <div style={S.perspControls}>
+            <span style={S.perspInfo}>
+              Click to place polygon points. Click the first point (pink) or press Apply to crop.
+              {polyPts.length > 0 && ` ${polyPts.length} point${polyPts.length > 1 ? 's' : ''} placed.`}
+            </span>
+            {polyPts.length > 0 && (
+              <button style={{ ...S.smallBtn, backgroundColor: '#555' }} onClick={() => setPolyPts((prev) => prev.slice(0, -1))}>
+                ↩ Undo pt
+              </button>
+            )}
+            <button style={{ ...S.smallBtn, backgroundColor: '#555' }} onClick={() => { setPolyPts([]); setMode('edit'); }}>
+              Cancel
+            </button>
+            <button
+              style={{ ...S.smallBtn, backgroundColor: '#E91E63', borderColor: '#E91E63', opacity: polyPts.length < 3 ? 0.5 : 1 }}
+              onClick={applyPolyCrop}
+              disabled={polyPts.length < 3 || polyProcessing}
+            >
+              {polyProcessing ? 'Cropping…' : 'Apply Polygon Crop →'}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ── EDIT MODE ── */}
       {mode === 'edit' && imageSrc && (
         <div style={S.editRoot}>
@@ -560,19 +752,23 @@ export default function ScannerPage() {
               ))}
             </div>
 
-            {/* Perspective */}
+            {/* Perspective / Polygon crop */}
             <div style={S.controlRow}>
-              <span style={S.controlLabel}>Perspective</span>
+              <span style={S.controlLabel}>Crop</span>
               <button
                 style={S.smallBtn}
                 onClick={() => setMode('perspective')}
                 title="Drag 4 corners to straighten a trapezoid paper to A4"
               >
-                ⬡ Correct Trapezoid
+                ⬡ Trapezoid Fix
               </button>
-              <span style={{ fontSize: '11px', color: '#666' }}>
-                Use for slanted / trapezoidal scans
-              </span>
+              <button
+                style={{ ...S.smallBtn, borderColor: '#E91E63', color: '#E91E63' }}
+                onClick={() => { setPolyPts([]); setMode('polygon'); }}
+                title="Draw a polygon around the document to crop it"
+              >
+                ⬠ Polygon Crop
+              </button>
             </div>
 
             {/* Rotate */}
