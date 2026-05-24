@@ -8,7 +8,7 @@ export const TAG_SCHEMAS = {
     latex_cmd: '\\text',
     fields: [
       { name: 'style', type: 'select', label: 'Style', options: ['handwritten', 'printed', 'mixed'] },
-      { name: 'lang', type: 'select', label: 'Language', options: ['english', 'kannada', 'hindi', 'tamil', 'sanskrit', 'mixed'] },
+      { name: 'lang', type: 'select', label: 'Language', options: ['english', 'kannada'] },
       { name: 'content', type: 'textarea', label: 'Transcription', required: true },
     ],
   },
@@ -37,7 +37,7 @@ export const TAG_SCHEMAS = {
     latex_cmd: '\\begin{paragraph}',
     is_environment: true,
     fields: [
-      { name: 'lang', type: 'select', label: 'Language', options: ['english', 'kannada', 'hindi', 'tamil', 'sanskrit', 'mixed'] },
+      { name: 'lang', type: 'select', label: 'Language', options: ['english', 'kannada'] },
       { name: 'content', type: 'textarea', label: 'Full text (sentences separated by newlines)', required: true },
     ],
   },
@@ -85,7 +85,6 @@ export const TAG_SCHEMAS = {
     colour: '#EF5350',
     latex_cmd: '\\underline',
     fields: [
-      { name: 'ink_colour', type: 'select', label: 'Ink colour', options: ['black', 'blue', 'red', 'pencil'] },
       { name: 'content', type: 'textarea', label: 'Underlined text' },
     ],
   },
@@ -373,20 +372,6 @@ export const TAG_SCHEMAS = {
       { name: 'chanda', type: 'text', label: 'Chanda identified (e.g. ಷಟ್ಪದಿ)' },
     ],
   },
-  prosody_sanskrit: {
-    label: 'Prosody (Sanskrit)',
-    colour: '#8E24AA',
-    latex_cmd: '\\begin{prosody}[lang=sanskrit]',
-    is_environment: true,
-    fields: [
-      { name: 'source_text', type: 'textarea', label: 'Base Sanskrit text (syllables + pipe dividers)', required: true },
-      { name: 'prastara_present', type: 'boolean', label: 'Prastara present' },
-      { name: 'gana_marks_present', type: 'boolean', label: 'Gana marks present' },
-      { name: 'laghu_guru_pattern', type: 'text', label: 'Laghu/Guru pattern' },
-      { name: 'gana_labels', type: 'text', label: 'Gana names' },
-      { name: 'chanda', type: 'text', label: 'Chanda identified' },
-    ],
-  },
   hwscore: {
     label: 'Handwriting Score',
     colour: '#CE93D8',
@@ -435,15 +420,6 @@ export const TAG_SCHEMAS = {
       { name: 'sentiment', type: 'select', label: 'Sentiment', options: ['positive', 'negative', 'neutral'] },
       { name: 'ink_colour', type: 'select', label: 'Ink colour', options: ['red', 'blue', 'black'] },
       { name: 'content', type: 'textarea', label: 'Comment text', required: true },
-    ],
-  },
-  teacher_stamp: {
-    label: 'Teacher Stamp',
-    colour: '#546E7A',
-    latex_cmd: '\\teacher_stamp',
-    fields: [
-      { name: 'stamp_type', type: 'select', label: 'Stamp type', options: ['checked', 'school_stamp', 'date_stamp'] },
-      { name: 'content', type: 'textarea', label: 'Text on stamp' },
     ],
   },
   stamp_circular: {
@@ -513,8 +489,8 @@ export const TAG_GROUPS = {
   STRUCTURE: ['tabular', 'enumerate', 'itemize'],
   DOCUMENT: ['formalletter', 'letter_informal', 'notice', 'application'],
   VISUAL: ['graph', 'map', 'diagram', 'flowchart'],
-  LANGUAGE: ['prosody_kannada', 'prosody_sanskrit', 'hwscore'],
-  ADMINISTRATIVE: ['teacher_mark', 'teacher_score', 'teacher_comment', 'teacher_stamp', 'stamp_circular', 'rough', 'metadata'],
+  LANGUAGE: ['prosody_kannada', 'hwscore'],
+  ADMINISTRATIVE: ['teacher_mark', 'teacher_score', 'teacher_comment', 'stamp_circular', 'rough', 'metadata'],
   WRAPPERS: ['answer', 'spread'],
 };
 

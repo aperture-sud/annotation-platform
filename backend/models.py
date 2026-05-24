@@ -46,6 +46,7 @@ class Box(Base):
     tag_category = Column(String, nullable=True)
     tag_data = Column(Text, nullable=True)
     content_text = Column(Text, nullable=True)
+    rotation = Column(Float, nullable=True)
     reading_order = Column(Integer, nullable=True)
     confidence = Column(String, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
@@ -56,4 +57,6 @@ class Box(Base):
         "Box",
         backref=backref("parent", remote_side="Box.id"),
         foreign_keys="Box.parent_box_id",
+        cascade="all, delete",
+        passive_deletes=True,
     )

@@ -27,6 +27,7 @@ def _migrate_db():
         for stmt in [
             "ALTER TABLE documents ADD COLUMN display_name TEXT",
             "ALTER TABLE boxes ADD COLUMN parent_box_id INTEGER REFERENCES boxes(id)",
+            "ALTER TABLE boxes ADD COLUMN rotation REAL",
         ]:
             try:
                 conn.execute(text(stmt))
@@ -272,6 +273,7 @@ def _box_dict(b: models.Box) -> dict:
         "y": b.y,
         "width": b.width,
         "height": b.height,
+        "rotation": b.rotation,
         "tag_category": b.tag_category,
         "tag_data": b.tag_data,
         "content_text": b.content_text,
@@ -363,9 +365,7 @@ def _box_to_latex(box: models.Box, indent: int = 0) -> str:
         return f"{sp}{cmd}{{{content}}}"
 
     if tag == "underline":
-        ink = td.get("ink_colour", "")
-        attr = f"[ink={ink}]" if ink else ""
-        return f"{sp}\\underline{attr}{{{content}}}"
+        return f"{sp}\\underline{{{content}}}"
 
     if tag == "circle":
         return f"{sp}\\circle{{{content}}}"
@@ -383,20 +383,21 @@ def _box_to_latex(box: models.Box, indent: int = 0) -> str:
     # ── CONTINUATIONS ─────────────────────────────────────────────────────
     if tag == "arrow_start":
         pair_id = td.get("pair_id", "?")
-        return f"{sp}\\arrow_start{{{pair_id}}}\n{sp}% content: {content}" if content else f"{sp}\\arrow_start{{{pair_id}}}"
+        attrs = f"[id={pair_id}]"
+        return f"{sp}\\arrow_start{attrs}{{{content}}}"
 
     if tag == "arrow_target":
         pair_id = td.get("pair_id", "?")
-        return f"{sp}\\arrow_target{{{pair_id}}}{{{content}}}"
+        return f"{sp}\\arrow_target[id={pair_id}]{{{content}}}"
 
     if tag == "page_start":
         pair_id = td.get("pair_id", "?")
         target = td.get("target_page", "?")
-        return f"{sp}\\page_start{{{pair_id}}}{{{content}}}"
+        return f"{sp}\\page_start[id={pair_id}, target_page={target}]{{{content}}}"
 
     if tag == "page_target":
         pair_id = td.get("pair_id", "?")
-        return f"{sp}\\page_target{{{pair_id}}}{{{content}}}"
+        return f"{sp}\\page_target[id={pair_id}]{{{content}}}"
 
     if tag == "marginnote":
         side = td.get("side", "")
@@ -552,10 +553,9 @@ def _box_to_latex(box: models.Box, indent: int = 0) -> str:
         return "\n".join(f"{sp}{l}" for l in lines)
 
     # ── LANGUAGE ──────────────────────────────────────────────────────────
-    if tag in ("prosody_kannada", "prosody_sanskrit"):
-        lang = "kannada" if tag == "prosody_kannada" else "sanskrit"
+    if tag == "prosody_kannada":
         src = td.get("source_text", "")
-        lines = [f"\\begin{{prosody}}[lang={lang}]"]
+        lines = [f"\\begin{{prosody}}[lang=kannada]"]
         lines.append(f"  \\begin{{prastara}}")
         lines.append(f"    {src}")
         lines.append(f"  \\end{{prastara}}")
@@ -596,10 +596,6 @@ def _box_to_latex(box: models.Box, indent: int = 0) -> str:
         sent = td.get("sentiment", "")
         ink = td.get("ink_colour", "")
         return f"{sp}\\teacher_comment[sentiment={sent}, ink={ink}]{{{content}}}"
-
-    if tag == "teacher_stamp":
-        stype = td.get("stamp_type", "")
-        return f"{sp}\\teacher_stamp[type={stype}]{{{content}}}"
 
     if tag == "stamp_circular":
         lines = [f"\\stamp[type=circular]{{"]
@@ -658,18 +654,27 @@ def _render_tree(box, children_map, indent):
     # Render parent open, then children indented, then parent close
     sp = "  " * indent
     tag = box.tag_category or "unknown"
-    schema = TAG_SCHEMAS_ENV.get(tag, False)
+    schema = tag in TAG_SCHEMAS_ENV
     child_lines = "\n\n".join(_render_tree(c, children_map, indent + 1) for c in children)
 
     if schema:
-        # Environment tag: embed children between \begin and \end
+        # Environment tag: embed own content (if any) + children between \begin and \end
         td = _tag_data(box)
         env = ENV_NAME.get(tag, tag)
         attrs = _env_attrs(tag, td, box)
         attr_str = f"[{attrs}]" if attrs else ""
-        return f"{sp}\\begin{{{env}}}{attr_str}\n\n{child_lines}\n\n{sp}\\end{{{env}}}"
+
+        own_content = (box.content_text or td.get("content") or "").strip()
+        inner_parts = []
+        if own_content:
+            for line in own_content.split("\n"):
+                if line.strip():
+                    inner_parts.append(f"{sp}  \\text{{{line.strip()}}}")
+        inner_parts.append(child_lines)
+        inner = "\n\n".join(p for p in inner_parts if p)
+        return f"{sp}\\begin{{{env}}}{attr_str}\n\n{inner}\n\n{sp}\\end{{{env}}}"
     else:
-        # Inline tag: render the tag, then children as sub-content
+        # Inline tag: render the tag line, then children below it
         try:
             parent_line = _box_to_latex(box, indent)
         except Exception as exc:
@@ -681,7 +686,7 @@ def _render_tree(box, children_map, indent):
 TAG_SCHEMAS_ENV = {
     "paragraph", "tabular", "enumerate", "itemize", "formalletter",
     "letter_informal", "notice", "application", "graph", "map",
-    "diagram", "flowchart", "prosody_kannada", "prosody_sanskrit",
+    "diagram", "flowchart", "prosody_kannada",
     "hwscore", "rough", "metadata", "answer", "spread",
 }
 
@@ -689,7 +694,6 @@ ENV_NAME = {
     "letter_informal": "letter",
     "formalletter": "formalletter",
     "prosody_kannada": "prosody",
-    "prosody_sanskrit": "prosody",
     "hwscore": "hwscore",
     "rough": "rough",
 }
@@ -698,8 +702,10 @@ def _env_attrs(tag, td, box):
     parts = []
     if tag == "answer":
         if td.get("question_id"): parts.append(f"q={td['question_id']}")
-    elif tag in ("prosody_kannada", "prosody_sanskrit"):
-        parts.append(f"lang={'kannada' if tag=='prosody_kannada' else 'sanskrit'}")
+    elif tag in ("paragraph", "text") and td.get("lang"):
+        parts.append(f"lang={td['lang']}")
+    elif tag == "prosody_kannada":
+        parts.append("lang=kannada")
     elif tag == "graph" and td.get("graph_type"):
         parts.append(f"type={td['graph_type']}")
     elif tag == "map" and td.get("map_type"):
