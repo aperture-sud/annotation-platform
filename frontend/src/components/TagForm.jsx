@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { TAG_SCHEMAS } from '../tags/tagSchemas.js';
 import { updateBox } from '../api/client.js';
+import getCaretCoordinates from 'textarea-caret';
 
 const S = {
   form: { padding: '12px', fontSize: '13px' },
@@ -31,17 +32,151 @@ const S = {
   saved: { color: '#4CAF50', fontSize: '12px', marginTop: '4px', textAlign: 'center' },
 };
 
-function FieldRenderer({ field, value, onChange }) {
+function KannadaTextarea({ value, onChange, style, placeholder }) {
+  const taRef = useRef(null);
+  const [suggestions, setSuggestions] = useState([]);
+  const [popupPos, setPopupPos] = useState(null);
+  const wordRangeRef = useRef(null);
+  const pendingCursor = useRef(null);
+  const abortRef = useRef(null);
+
+  useEffect(() => {
+    if (pendingCursor.current !== null && taRef.current) {
+      taRef.current.setSelectionRange(pendingCursor.current, pendingCursor.current);
+      pendingCursor.current = null;
+    }
+  });
+
+  function getCurrentWord(ta) {
+    const cursor = ta.selectionStart;
+    const text = ta.value;
+    let start = cursor;
+    while (start > 0 && text[start - 1] !== ' ' && text[start - 1] !== '\n') start--;
+    return { start, end: cursor, word: text.slice(start, cursor) };
+  }
+
+  function applyChoice(suggestion) {
+    const range = wordRangeRef.current;
+    if (!range) return;
+    const text = taRef.current.value;
+    const newVal = text.slice(0, range.start) + suggestion + text.slice(range.end);
+    pendingCursor.current = range.start + suggestion.length;
+    onChange(newVal);
+    setSuggestions([]);
+    setPopupPos(null);
+    wordRangeRef.current = null;
+  }
+
+  async function fetchSuggestions(word, range) {
+    if (abortRef.current) abortRef.current.abort();
+    abortRef.current = new AbortController();
+    try {
+      const res = await fetch(
+        `https://inputtools.google.com/request?text=${encodeURIComponent(word)}&itc=kn-t-i0-und&num=5&cp=0&cs=1&ie=utf-8&oe=utf-8`,
+        { signal: abortRef.current.signal }
+      );
+      const data = await res.json();
+      if (data[0] === 'SUCCESS' && data[1]?.[0]?.[1]?.length) {
+        const list = data[1][0][1];
+        const ta = taRef.current;
+        const coords = getCaretCoordinates(ta, range.start);
+        const rect = ta.getBoundingClientRect();
+        setSuggestions(list);
+        setPopupPos({ left: rect.left + coords.left, top: rect.top + coords.top + coords.height + 2 });
+        wordRangeRef.current = range;
+      } else {
+        setSuggestions([]);
+      }
+    } catch (err) {
+      if (err.name !== 'AbortError') setSuggestions([]);
+    }
+  }
+
+  function handleChange(e) {
+    onChange(e.target.value);
+    const range = getCurrentWord(e.target);
+    if (range.word && !/[ಀ-೿]/.test(range.word)) {
+      fetchSuggestions(range.word, range);
+    } else {
+      setSuggestions([]);
+    }
+  }
+
+  function handleKeyDown(e) {
+    if (!suggestions.length) return;
+    if (e.key === 'Escape') { e.preventDefault(); setSuggestions([]); return; }
+    if (e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault();
+      const chosen = suggestions[0];
+      const range = wordRangeRef.current;
+      const text = taRef.current.value;
+      const sep = e.key === ' ' ? ' ' : '\n';
+      const newVal = text.slice(0, range.start) + chosen + sep + text.slice(range.end);
+      pendingCursor.current = range.start + chosen.length + 1;
+      onChange(newVal);
+      setSuggestions([]);
+      setPopupPos(null);
+      wordRangeRef.current = null;
+    }
+  }
+
+  return (
+    <>
+      <textarea
+        ref={taRef}
+        style={style}
+        value={value ?? ''}
+        onChange={handleChange}
+        onKeyDown={handleKeyDown}
+        onBlur={() => setTimeout(() => setSuggestions([]), 150)}
+        placeholder={placeholder}
+      />
+      {suggestions.length > 0 && popupPos && (
+        <div style={{
+          position: 'fixed', left: popupPos.left, top: popupPos.top,
+          backgroundColor: '#fff', border: '1px solid #ccc', borderRadius: '4px',
+          boxShadow: '0 2px 8px rgba(0,0,0,0.15)', zIndex: 9999,
+          display: 'flex', gap: '4px', padding: '4px',
+        }}>
+          {suggestions.map((s, i) => (
+            <button
+              key={i}
+              onMouseDown={(e) => { e.preventDefault(); applyChoice(s); }}
+              style={{
+                padding: '4px 10px', fontSize: '14px', cursor: 'pointer', borderRadius: '3px',
+                border: i === 0 ? '1px solid #9C27B0' : '1px solid #eee',
+                backgroundColor: i === 0 ? '#f3e5f5' : '#fff',
+              }}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function FieldRenderer({ field, value, onChange, transliterate }) {
   if (field.type === 'textarea') {
     return (
       <div style={S.fieldWrapper}>
         <label style={S.label}>{field.label}{field.required ? ' *' : ''}</label>
-        <textarea
-          style={S.textarea}
-          value={value ?? ''}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder={field.required ? 'Required' : ''}
-        />
+        {transliterate ? (
+          <KannadaTextarea
+            value={value ?? ''}
+            onChange={onChange}
+            style={S.textarea}
+            placeholder={field.required ? 'Required' : ''}
+          />
+        ) : (
+          <textarea
+            style={S.textarea}
+            value={value ?? ''}
+            onChange={(e) => onChange(e.target.value)}
+            placeholder={field.required ? 'Required' : ''}
+          />
+        )}
       </div>
     );
   }
@@ -100,6 +235,7 @@ export default function TagForm({ box, onUpdate }) {
   const [confidence, setConfidence] = useState('high');
   const [saving, setSaving] = useState(false);
   const [savedMsg, setSavedMsg] = useState(false);
+  const [transliterate, setTransliterate] = useState(false);
 
   // Reset form data when box changes
   useEffect(() => {
@@ -161,6 +297,19 @@ export default function TagForm({ box, onUpdate }) {
       <div style={S.tagHeader}>
         <span style={{ ...S.swatch, backgroundColor: schema.colour }} />
         <span style={S.tagLabel}>{schema.label}</span>
+        <button
+          onClick={() => setTransliterate((v) => !v)}
+          style={{
+            marginLeft: 'auto', padding: '2px 8px', fontSize: '11px', borderRadius: '3px',
+            cursor: 'pointer', border: '1px solid',
+            borderColor: transliterate ? '#9C27B0' : '#ccc',
+            color: transliterate ? '#9C27B0' : '#888',
+            backgroundColor: transliterate ? '#f3e5f5' : '#fff',
+            fontWeight: transliterate ? '600' : '400',
+          }}
+        >
+          Kannada
+        </button>
       </div>
 
       {/* Reading order + confidence */}
@@ -191,6 +340,7 @@ export default function TagForm({ box, onUpdate }) {
           field={field}
           value={formData[field.name] ?? (field.type === 'boolean' ? false : '')}
           onChange={(v) => setField(field.name, v)}
+          transliterate={transliterate}
         />
       ))}
 
