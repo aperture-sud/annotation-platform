@@ -176,12 +176,15 @@ const ImageCanvas = forwardRef(function ImageCanvas({
     const wPct = rect.w / dW;
     const hPct = rect.h / dH;
     const rotDeg = (rect.angle * 180) / Math.PI;
+    // Store actual polygon vertices as fractional image coords
+    const polygonFrac = pts.map((p) => [(p.x - oX) / dW, (p.y - oY) / dH]);
     onBoxCreatedRef.current({
       x: centerX - wPct / 2,
       y: centerY - hPct / 2,
       width: wPct,
       height: hPct,
       rotation: rotDeg,
+      polygon_points: JSON.stringify(polygonFrac),
     });
     polyPointsRef.current = [];
     setPolyPoints([]);
@@ -338,9 +341,37 @@ const ImageCanvas = forwardRef(function ImageCanvas({
             })()}
 
             {boxes.map((box) => {
-              const { x, y, w, h } = pctToStage(box.x, box.y, box.width, box.height);
               const isSelected = box.id === selectedBoxId;
               const colour = getTagColour(box.tag_category);
+              const listening = !childMode && !polyMode;
+
+              // Polygon box — render actual shape, no transformer
+              if (box.polygon_points) {
+                try {
+                  const pts = JSON.parse(box.polygon_points);
+                  const flatPoints = pts.flatMap(([xf, yf]) => [
+                    offsetX + xf * displayW,
+                    offsetY + yf * displayH,
+                  ]);
+                  return (
+                    <Line
+                      key={box.id}
+                      points={flatPoints}
+                      closed={true}
+                      stroke={colour} strokeWidth={isSelected ? 3 : 2}
+                      fill={isSelected ? `${colour}22` : `${colour}11`}
+                      listening={listening}
+                      onClick={(e) => { e.cancelBubble = true; onBoxSelect(box.id); }}
+                      onTap={(e) => { e.cancelBubble = true; onBoxSelect(box.id); }}
+                    />
+                  );
+                } catch {
+                  return null;
+                }
+              }
+
+              // Regular rectangle box
+              const { x, y, w, h } = pctToStage(box.x, box.y, box.width, box.height);
               const rotDeg = box.rotation ?? 0;
               const cx = x + w / 2, cy = y + h / 2;
               return (
@@ -352,8 +383,7 @@ const ImageCanvas = forwardRef(function ImageCanvas({
                   rotation={rotDeg}
                   stroke={colour} strokeWidth={isSelected ? 3 : 2}
                   fill={isSelected ? `${colour}22` : `${colour}11`}
-                  // In childMode rects don't intercept clicks — clicks fall to stage for drawing
-                  listening={!childMode && !polyMode}
+                  listening={listening}
                   draggable={isSelected && !childMode && !polyMode}
                   onClick={(e) => { e.cancelBubble = true; onBoxSelect(box.id); }}
                   onTap={(e) => { e.cancelBubble = true; onBoxSelect(box.id); }}

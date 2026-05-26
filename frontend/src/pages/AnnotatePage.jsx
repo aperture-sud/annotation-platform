@@ -7,6 +7,7 @@ import ImageCanvas from '../components/ImageCanvas.jsx';
 import BoxList from '../components/BoxList.jsx';
 import TagDropdown from '../components/TagDropdown.jsx';
 import TagForm from '../components/TagForm.jsx';
+import UniversalKeyboard from '../components/UniversalKeyboard.jsx';
 
 const PANEL_WIDTH = 340;
 
@@ -51,6 +52,7 @@ export default function AnnotatePage() {
   const [tagPickingFor, setTagPickingFor] = useState(null);
   const [addingChildFor, setAddingChildFor] = useState(null);
   const [polyMode, setPolyMode] = useState(false);
+  const [showKeyboard, setShowKeyboard] = useState(false);
   const canvasRef = useRef(null);
 
   // Undo/redo stacks — each entry: { undo: async fn, redo: async fn }
@@ -346,6 +348,13 @@ export default function AnnotatePage() {
         >
           {polyMode ? 'Polygon ON' : 'Polygon'}
         </button>
+        <button
+          style={{ ...styles.topbarBtn, ...(showKeyboard ? { backgroundColor: '#4CAF50', borderColor: '#4CAF50' } : {}) }}
+          onClick={() => setShowKeyboard((v) => !v)}
+          title="Toggle keyboard shortcuts"
+        >
+          ⌨ Keys
+        </button>
         <button style={styles.topbarBtn} onClick={handleExport}>Export</button>
       </div>
 
@@ -378,7 +387,7 @@ export default function AnnotatePage() {
         </div>
       )}
 
-      <div style={styles.body}>
+      <div style={{ ...styles.body, position: 'relative' }}>
         {/* Canvas */}
         <div style={styles.canvasArea}>
           {imageUrl && (
@@ -398,6 +407,18 @@ export default function AnnotatePage() {
             />
           )}
         </div>
+
+        {/* Universal keyboard — slides in over canvas from the right */}
+        {showKeyboard && (
+          <div style={{
+            position: 'absolute', right: PANEL_WIDTH, top: 0, bottom: 0,
+            width: 220, backgroundColor: '#fff', overflowY: 'auto',
+            borderLeft: '1px solid #ddd', boxShadow: '-3px 0 10px rgba(0,0,0,0.08)',
+            zIndex: 5,
+          }}>
+            <UniversalKeyboard />
+          </div>
+        )}
 
         {/* Right panel */}
         <div style={styles.rightPanel}>

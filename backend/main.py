@@ -28,6 +28,7 @@ def _migrate_db():
             "ALTER TABLE documents ADD COLUMN display_name TEXT",
             "ALTER TABLE boxes ADD COLUMN parent_box_id INTEGER REFERENCES boxes(id)",
             "ALTER TABLE boxes ADD COLUMN rotation REAL",
+            "ALTER TABLE boxes ADD COLUMN polygon_points TEXT",
         ]:
             try:
                 conn.execute(text(stmt))
@@ -274,6 +275,7 @@ def _box_dict(b: models.Box) -> dict:
         "width": b.width,
         "height": b.height,
         "rotation": b.rotation,
+        "polygon_points": b.polygon_points,
         "tag_category": b.tag_category,
         "tag_data": b.tag_data,
         "content_text": b.content_text,
