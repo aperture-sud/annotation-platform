@@ -228,14 +228,13 @@ function FieldRenderer({ field, value, onChange, transliterate }) {
   return null;
 }
 
-export default function TagForm({ box, onUpdate }) {
+export default function TagForm({ box, onUpdate, transliterate }) {
   const schema = TAG_SCHEMAS[box?.tag_category];
   const [formData, setFormData] = useState({});
   const [readingOrder, setReadingOrder] = useState('');
   const [confidence, setConfidence] = useState('high');
   const [saving, setSaving] = useState(false);
   const [savedMsg, setSavedMsg] = useState(false);
-  const [transliterate, setTransliterate] = useState(false);
 
   // Reset form data when box changes
   useEffect(() => {
@@ -297,19 +296,6 @@ export default function TagForm({ box, onUpdate }) {
       <div style={S.tagHeader}>
         <span style={{ ...S.swatch, backgroundColor: schema.colour }} />
         <span style={S.tagLabel}>{schema.label}</span>
-        <button
-          onClick={() => setTransliterate((v) => !v)}
-          style={{
-            marginLeft: 'auto', padding: '2px 8px', fontSize: '11px', borderRadius: '3px',
-            cursor: 'pointer', border: '1px solid',
-            borderColor: transliterate ? '#9C27B0' : '#ccc',
-            color: transliterate ? '#9C27B0' : '#888',
-            backgroundColor: transliterate ? '#f3e5f5' : '#fff',
-            fontWeight: transliterate ? '600' : '400',
-          }}
-        >
-          Kannada
-        </button>
       </div>
 
       {/* Reading order + confidence */}

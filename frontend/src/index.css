@@ -1,0 +1,73 @@
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Scrollbars ────────────────────────────────────────────────────────────── */
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #d0d0d0; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #b0b0b0; }
+
+/* ── Topbar buttons ─────────────────────────────────────────────────────────── */
+
+.tb-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  border-radius: 6px;
+  border: 1px solid #e0e0e0;
+  background: #f7f7f7;
+  color: #3a3a3a;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background 0.1s, border-color 0.1s;
+  line-height: 1;
+}
+.tb-btn:hover:not(:disabled) {
+  background: #eeeeee;
+  border-color: #cacaca;
+}
+.tb-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* Tool active states */
+.tb-btn.on-poly    { background: #fce4ec; border-color: #f06292; color: #b71c1c; }
+.tb-btn.on-poly:hover    { background: #f8bbd0; }
+.tb-btn.on-keys    { background: #e8f5e9; border-color: #66bb6a; color: #1b5e20; }
+.tb-btn.on-keys:hover    { background: #c8e6c9; }
+.tb-btn.on-kn      { background: #fff8e1; border-color: #ffd54f; color: #e65100; }
+.tb-btn.on-kn:hover      { background: #fff3cd; }
+.tb-btn.on-preview { background: #ede7f6; border-color: #9575cd; color: #4a148c; }
+.tb-btn.on-preview:hover { background: #d1c4e9; }
+.tb-btn.btn-export { background: #e3f2fd; border-color: #64b5f6; color: #0d47a1; }
+.tb-btn.btn-export:hover { background: #bbdefb; }
+
+/* Panel inner action links */
+.panel-link {
+  font-size: 11px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* Input / select focus ring */
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: #90caf9 !important;
+  box-shadow: 0 0 0 2px rgba(33,150,243,0.12);
+}
+

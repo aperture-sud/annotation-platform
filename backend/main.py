@@ -26,6 +26,7 @@ def _migrate_db():
     with engine.connect() as conn:
         for stmt in [
             "ALTER TABLE documents ADD COLUMN display_name TEXT",
+            "ALTER TABLE pages ADD COLUMN display_name TEXT",
             "ALTER TABLE boxes ADD COLUMN parent_box_id INTEGER REFERENCES boxes(id)",
             "ALTER TABLE boxes ADD COLUMN rotation REAL",
             "ALTER TABLE boxes ADD COLUMN polygon_points TEXT",
@@ -69,7 +70,7 @@ async def upload_files(
     db_doc = models.Document(
         filename=doc_slug,
         original_filename=first.filename or "upload",
-        display_name=base_name,
+        display_name=None,
         page_count=len(files),
         status="pending",
     )
@@ -132,11 +133,11 @@ def list_documents(db: Session = Depends(get_db)):
             "id": doc.id,
             "filename": doc.filename,
             "original_filename": doc.original_filename,
-            "display_name": doc.display_name or doc.original_filename,
+            "display_name": doc.display_name,
             "upload_date": doc.upload_date.isoformat() if doc.upload_date else None,
             "status": doc.status,
             "page_count": doc.page_count,
-            "pages": [{"id": p.id, "page_number": p.page_number, "status": p.status} for p in pages],
+            "pages": [{"id": p.id, "page_number": p.page_number, "display_name": p.display_name, "status": p.status} for p in pages],
         })
     return result
 
@@ -217,10 +218,23 @@ def get_page(page_id: int, db: Session = Depends(get_db)):
         "document_id": page.document_id,
         "page_number": page.page_number,
         "image_path": page.image_path,
+        "display_name": page.display_name,
         "width": page.width,
         "height": page.height,
         "status": page.status,
     }
+
+
+@app.patch("/pages/{page_id}")
+def update_page(page_id: int, payload: schemas.PageUpdate, db: Session = Depends(get_db)):
+    page = db.query(models.Page).filter(models.Page.id == page_id).first()
+    if not page:
+        raise HTTPException(status_code=404, detail="Page not found")
+    if payload.display_name is not None:
+        page.display_name = payload.display_name
+    db.commit()
+    db.refresh(page)
+    return {"id": page.id, "display_name": page.display_name}
 
 
 @app.get("/pages/{page_id}/boxes")

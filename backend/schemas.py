@@ -81,3 +81,7 @@ class DocumentOut(BaseModel):
 class DocumentUpdate(BaseModel):
     display_name: Optional[str] = None
     status: Optional[str] = None
+
+
+class PageUpdate(BaseModel):
+    display_name: Optional[str] = None

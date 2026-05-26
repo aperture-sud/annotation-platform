@@ -1,45 +1,74 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
-  getPage, getPageBoxes, createBox, updateBox, deleteBox, exportPage, IMAGE_BASE_URL,
+  getPage, getPageBoxes, createBox, updateBox, deleteBox, exportPage, renamePage, IMAGE_BASE_URL,
 } from '../api/client.js';
 import ImageCanvas from '../components/ImageCanvas.jsx';
 import BoxList from '../components/BoxList.jsx';
 import TagDropdown from '../components/TagDropdown.jsx';
 import TagForm from '../components/TagForm.jsx';
 import UniversalKeyboard from '../components/UniversalKeyboard.jsx';
+import Renderer from '../components/Renderer.jsx';
 
 const PANEL_WIDTH = 340;
 
-const styles = {
+const S = {
   root: { display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' },
+
   topbar: {
-    display: 'flex', alignItems: 'center', padding: '8px 16px',
-    backgroundColor: '#1e1e2e', color: '#fff', gap: '8px', flexShrink: 0, flexWrap: 'wrap',
+    display: 'flex', alignItems: 'center', height: '48px', padding: '0 12px',
+    backgroundColor: '#fff', borderBottom: '1px solid #e2e4e7',
+    boxShadow: '0 1px 4px rgba(0,0,0,0.06)', flexShrink: 0, gap: '3px',
+    overflowX: 'auto',
   },
-  topbarTitle: { fontWeight: '600', fontSize: '14px', flex: 1 },
+  title: {
+    fontSize: '13px', color: '#666', fontWeight: 500,
+    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '220px',
+  },
+  spacer: { flex: 1, minWidth: '6px' },
+  sep: { width: '1px', height: '20px', backgroundColor: '#e2e4e7', flexShrink: 0, margin: '0 5px' },
+
   body: { display: 'flex', flex: 1, overflow: 'hidden' },
-  canvasArea: { flex: 1, overflow: 'hidden', backgroundColor: '#222', position: 'relative' },
+
+  canvasAreaBase: {
+    flexShrink: 0, display: 'flex', flexDirection: 'column',
+  },
+  canvasTitle: {
+    padding: '0 14px', height: '34px', display: 'flex', alignItems: 'center',
+    borderBottom: '1px solid #d4d4d4', fontSize: '13px', fontWeight: 600,
+    color: '#333', flexShrink: 0, backgroundColor: '#f2f2f2',
+  },
+  canvasBody: {
+    flex: 1, overflow: 'hidden', padding: '12px', backgroundColor: '#e8e8e8',
+  },
+
   rightPanel: {
     width: `${PANEL_WIDTH}px`, flexShrink: 0, backgroundColor: '#fff',
-    borderLeft: '1px solid #ddd', display: 'flex', flexDirection: 'column', overflow: 'hidden',
+    borderLeft: '1px solid #d4d4d4', boxShadow: '-3px 0 12px rgba(0,0,0,0.07)',
+    display: 'flex', flexDirection: 'column', overflow: 'hidden',
   },
   panelSection: { borderBottom: '1px solid #eee', overflowY: 'auto' },
-  topbarBtn: {
-    padding: '5px 12px', fontSize: '12px', border: '1px solid rgba(255,255,255,0.3)',
-    borderRadius: '4px', color: '#fff', backgroundColor: 'transparent', cursor: 'pointer',
-    flexShrink: 0,
+
+  rendererPanel: {
+    flex: 1, minWidth: 0, backgroundColor: '#e8e8e8',
+    borderLeft: '1px solid #d4d4d4', boxShadow: '-2px 0 8px rgba(0,0,0,0.05)',
+    display: 'flex', flexDirection: 'column', overflow: 'hidden',
   },
-  topbarBtnDisabled: {
-    padding: '5px 12px', fontSize: '12px', border: '1px solid rgba(255,255,255,0.1)',
-    borderRadius: '4px', color: 'rgba(255,255,255,0.3)', backgroundColor: 'transparent',
-    cursor: 'default', flexShrink: 0,
+  rendererTitle: {
+    padding: '0 14px', height: '34px', display: 'flex', alignItems: 'center',
+    borderBottom: '1px solid #d8d8d8', fontSize: '11px', fontWeight: 700,
+    color: '#444', letterSpacing: '0.08em', textTransform: 'uppercase',
+    flexShrink: 0, backgroundColor: '#f2f2f2',
   },
-  hint: { fontSize: '11px', color: 'rgba(255,255,255,0.5)' },
-  childBanner: {
-    padding: '6px 12px', backgroundColor: '#FF9800', color: '#fff',
-    fontSize: '12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-    flexShrink: 0,
+
+  banner: (color) => ({
+    padding: '6px 14px', backgroundColor: color, color: '#fff',
+    fontSize: '12px', fontWeight: 500,
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0,
+  }),
+  bannerBtn: {
+    background: 'none', border: '1px solid rgba(255,255,255,0.55)',
+    color: '#fff', borderRadius: '4px', padding: '2px 8px', cursor: 'pointer', fontSize: '11px',
   },
 };
 
@@ -53,9 +82,20 @@ export default function AnnotatePage() {
   const [addingChildFor, setAddingChildFor] = useState(null);
   const [polyMode, setPolyMode] = useState(false);
   const [showKeyboard, setShowKeyboard] = useState(false);
+  const [showRenderer, setShowRenderer] = useState(false);
+  const [transliterate, setTransliterate] = useState(false);
+  const [canvasColumnWidth, setCanvasColumnWidth] = useState(null);
+  const [pageTitle, setPageTitle] = useState('');
+  const [editingTitle, setEditingTitle] = useState(false);
   const canvasRef = useRef(null);
 
-  // Undo/redo stacks — each entry: { undo: async fn, redo: async fn }
+  const handleIdealWidth = useCallback((w) => {
+    setCanvasColumnWidth((prev) => {
+      const r = Math.round(w);
+      return prev === r ? prev : r;
+    });
+  }, []);
+
   const undoStack = useRef([]);
   const redoStack = useRef([]);
   const [canUndo, setCanUndo] = useState(false);
@@ -92,13 +132,21 @@ export default function AnnotatePage() {
     try {
       const [pg, bxs] = await Promise.all([getPage(pageId), getPageBoxes(pageId)]);
       setPage(pg);
+      setPageTitle(pg.display_name || `p.${pg.page_number}`);
       setBoxes(bxs);
     } catch (e) {
       console.error('Failed to load page', e);
     }
   }
 
-  // Keyboard shortcuts
+  async function commitTitle(val) {
+    const trimmed = val.trim();
+    if (!trimmed) return;
+    setPageTitle(trimmed);
+    setEditingTitle(false);
+    try { await renamePage(pageId, trimmed); } catch (e) { console.error('Rename failed', e); }
+  }
+
   useEffect(() => {
     function onKey(e) {
       if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
@@ -112,12 +160,9 @@ export default function AnnotatePage() {
 
   const handleBoxCreated = useCallback(async (coords) => {
     try {
-      // Assign next reading order immediately at creation
       const maxOrder = boxes.reduce((max, b) => b.reading_order != null ? Math.max(max, b.reading_order) : max, 0);
       const payload = {
-        page_id: Number(pageId),
-        ...coords,
-        reading_order: maxOrder + 1,
+        page_id: Number(pageId), ...coords, reading_order: maxOrder + 1,
         ...(addingChildFor ? { parent_box_id: addingChildFor } : {}),
       };
       const newBox = await createBox(payload);
@@ -130,14 +175,12 @@ export default function AnnotatePage() {
       let trackedBox = newBox;
       recordAction(
         async () => {
-          // undo: delete the box
           await deleteBox(trackedBox.id);
           setBoxes((prev) => prev.filter((b) => b.id !== trackedBox.id));
           setSelectedBoxId((s) => s === trackedBox.id ? null : s);
           setTagPickingFor((t) => t === trackedBox.id ? null : t);
         },
         async () => {
-          // redo: re-create the box
           const { id: _, created_at, ...data } = trackedBox;
           const recreated = await createBox(data);
           trackedBox = recreated;
@@ -154,11 +197,7 @@ export default function AnnotatePage() {
     setSelectedBoxId(id);
     setAddingChildFor(null);
     const box = boxes.find((b) => b.id === id);
-    if (box && !box.tag_category) {
-      setTagPickingFor(id);
-    } else {
-      setTagPickingFor(null);
-    }
+    setTagPickingFor(box && !box.tag_category ? id : null);
   }, [boxes]);
 
   const handleBoxDeselect = useCallback(() => {
@@ -169,59 +208,42 @@ export default function AnnotatePage() {
 
   const handleBoxDelete = useCallback(async (id) => {
     try {
-      // Collect all descendants recursively (deepest first so deletion order is leaf→root)
       function collectDescendants(boxId) {
         const children = boxes.filter((b) => b.parent_box_id === boxId);
         return children.flatMap((c) => [...collectDescendants(c.id), c]);
       }
-
       const rootBox = boxes.find((b) => b.id === id);
       if (!rootBox) return;
-
       const descendants = collectDescendants(id);
-      const allToDelete = [...descendants, rootBox]; // children first, root last
+      const allToDelete = [...descendants, rootBox];
       const deletedIds = new Set(allToDelete.map((b) => b.id));
 
-      for (const box of allToDelete) {
-        await deleteBox(box.id);
-      }
-
+      for (const box of allToDelete) await deleteBox(box.id);
       setBoxes((prev) => prev.filter((b) => !deletedIds.has(b.id)));
       if (deletedIds.has(selectedBoxId)) {
-        setSelectedBoxId(null);
-        setTagPickingFor(null);
-        setAddingChildFor(null);
+        setSelectedBoxId(null); setTagPickingFor(null); setAddingChildFor(null);
       }
 
       let trackedDeleted = allToDelete.map((b) => ({ ...b }));
-
       recordAction(
         async () => {
-          // Undo: restore in reverse order (root first, then children) so parents precede children
           const idMap = {};
           for (const b of [...trackedDeleted].reverse()) {
             const { id: oldId, created_at, ...data } = b;
-            if (data.parent_box_id && idMap[data.parent_box_id] !== undefined) {
+            if (data.parent_box_id && idMap[data.parent_box_id] !== undefined)
               data.parent_box_id = idMap[data.parent_box_id];
-            }
             const newBox = await createBox(data);
             idMap[oldId] = newBox.id;
             setBoxes((prev) => [...prev, newBox]);
           }
-          // Update tracked IDs for subsequent redo
           trackedDeleted = trackedDeleted.map((b) => ({
-            ...b,
-            id: idMap[b.id] ?? b.id,
-            parent_box_id: (b.parent_box_id && idMap[b.parent_box_id] !== undefined)
-              ? idMap[b.parent_box_id]
-              : b.parent_box_id,
+            ...b, id: idMap[b.id] ?? b.id,
+            parent_box_id: b.parent_box_id && idMap[b.parent_box_id] !== undefined
+              ? idMap[b.parent_box_id] : b.parent_box_id,
           }));
         },
         async () => {
-          // Redo: delete all again
-          for (const b of trackedDeleted) {
-            try { await deleteBox(b.id); } catch {}
-          }
+          for (const b of trackedDeleted) { try { await deleteBox(b.id); } catch {} }
           const ids = new Set(trackedDeleted.map((b) => b.id));
           setBoxes((prev) => prev.filter((b) => !ids.has(b.id)));
         },
@@ -236,24 +258,14 @@ export default function AnnotatePage() {
       const oldBox = boxes.find((b) => b.id === id);
       const updated = await updateBox(id, coords);
       setBoxes((prev) => prev.map((b) => (b.id === id ? updated : b)));
-
       if (oldBox) {
         const oldCoords = { x: oldBox.x, y: oldBox.y, width: oldBox.width, height: oldBox.height, rotation: oldBox.rotation };
-        const newCoords = coords;
         recordAction(
-          async () => {
-            const restored = await updateBox(id, oldCoords);
-            setBoxes((prev) => prev.map((b) => (b.id === id ? restored : b)));
-          },
-          async () => {
-            const reapplied = await updateBox(id, newCoords);
-            setBoxes((prev) => prev.map((b) => (b.id === id ? reapplied : b)));
-          },
+          async () => { const r = await updateBox(id, oldCoords); setBoxes((prev) => prev.map((b) => b.id === id ? r : b)); },
+          async () => { const r = await updateBox(id, coords);    setBoxes((prev) => prev.map((b) => b.id === id ? r : b)); },
         );
       }
-    } catch (e) {
-      console.error('Failed to update box geometry', e);
-    }
+    } catch (e) { console.error('Failed to update box geometry', e); }
   }, [boxes]);
 
   function handleTagPicked(tagType) {
@@ -266,31 +278,13 @@ export default function AnnotatePage() {
   function handleBoxUpdated(updatedBox) {
     const oldBox = boxes.find((b) => b.id === updatedBox.id);
     setBoxes((prev) => prev.map((b) => (b.id === updatedBox.id ? updatedBox : b)));
-
     if (oldBox) {
-      const snapshot = { ...oldBox };
-      const newSnapshot = { ...updatedBox };
+      const snap = { ...oldBox }, newSnap = { ...updatedBox };
+      const fields = ['tag_category', 'tag_data', 'content_text', 'reading_order', 'confidence'];
+      const extract = (b) => Object.fromEntries(fields.map((f) => [f, b[f]]));
       recordAction(
-        async () => {
-          const restored = await updateBox(snapshot.id, {
-            tag_category: snapshot.tag_category,
-            tag_data: snapshot.tag_data,
-            content_text: snapshot.content_text,
-            reading_order: snapshot.reading_order,
-            confidence: snapshot.confidence,
-          });
-          setBoxes((prev) => prev.map((b) => (b.id === snapshot.id ? restored : b)));
-        },
-        async () => {
-          const reapplied = await updateBox(newSnapshot.id, {
-            tag_category: newSnapshot.tag_category,
-            tag_data: newSnapshot.tag_data,
-            content_text: newSnapshot.content_text,
-            reading_order: newSnapshot.reading_order,
-            confidence: newSnapshot.confidence,
-          });
-          setBoxes((prev) => prev.map((b) => (b.id === newSnapshot.id ? reapplied : b)));
-        },
+        async () => { const r = await updateBox(snap.id, extract(snap)); setBoxes((prev) => prev.map((b) => b.id === snap.id ? r : b)); },
+        async () => { const r = await updateBox(newSnap.id, extract(newSnap)); setBoxes((prev) => prev.map((b) => b.id === newSnap.id ? r : b)); },
       );
     }
   }
@@ -301,199 +295,193 @@ export default function AnnotatePage() {
       const blob = new Blob([text], { type: 'text/plain' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = url;
-      a.download = `page_${pageId}_export.txt`;
-      a.click();
+      a.href = url; a.download = `${pageTitle || `page_${pageId}`}.txt`; a.click();
       URL.revokeObjectURL(url);
-    } catch (e) {
-      console.error('Export failed', e);
-    }
+    } catch (e) { console.error('Export failed', e); }
   }
 
   const selectedBox = boxes.find((b) => b.id === selectedBoxId) || null;
-  const parentOfSelected = selectedBox?.parent_box_id
-    ? boxes.find((b) => b.id === selectedBox.parent_box_id)
-    : null;
+  const parentOfSelected = selectedBox?.parent_box_id ? boxes.find((b) => b.id === selectedBox.parent_box_id) : null;
   const imageUrl = page ? `${IMAGE_BASE_URL}/${page.image_path}` : null;
 
   return (
-    <div style={styles.root}>
-      {/* Top bar */}
-      <div style={styles.topbar}>
-        <button style={styles.topbarBtn} onClick={() => navigate('/')}>← Home</button>
-        <span style={styles.topbarTitle}>
-          {page ? `Page ${page.page_number} — ${page.image_path}` : 'Loading…'}
-        </span>
-        <span style={styles.hint}>Draw · Click · Delete · Ctrl+Z/Y</span>
+    <div style={S.root}>
+      {/* ── Topbar ────────────────────────────────────────────────────────── */}
+      <div style={S.topbar}>
+        <button className="tb-btn" onClick={() => navigate('/')}>← Home</button>
+        <div style={S.sep} />
+        {editingTitle ? (
+          <input
+            autoFocus
+            defaultValue={pageTitle}
+            style={{ ...S.title, border: '1px solid #ccc', borderRadius: '3px', padding: '2px 6px', outline: 'none', maxWidth: '220px' }}
+            onBlur={(e) => commitTitle(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') commitTitle(e.target.value); if (e.key === 'Escape') setEditingTitle(false); }}
+          />
+        ) : (
+          <span style={{ ...S.title, cursor: 'text' }} title="Click to rename" onClick={() => setEditingTitle(true)}>
+            {pageTitle || 'Loading…'}
+          </span>
+        )}
+        <div style={S.spacer} />
+
+        {/* Drawing tools */}
         <button
-          style={canUndo ? styles.topbarBtn : styles.topbarBtnDisabled}
-          onClick={handleUndo}
-          disabled={!canUndo}
-          title="Undo (Ctrl+Z)"
-        >
-          ↩ Undo
-        </button>
-        <button
-          style={canRedo ? styles.topbarBtn : styles.topbarBtnDisabled}
-          onClick={handleRedo}
-          disabled={!canRedo}
-          title="Redo (Ctrl+Y)"
-        >
-          ↪ Redo
-        </button>
-        <button
-          style={{ ...styles.topbarBtn, ...(polyMode ? { backgroundColor: '#E91E63', borderColor: '#E91E63' } : {}) }}
+          className={`tb-btn${polyMode ? ' on-poly' : ''}`}
           onClick={() => setPolyMode((v) => !v)}
-          title="Polygon drawing mode — click points, double-click or click first point to close"
+          title="Polygon drawing mode"
         >
-          {polyMode ? 'Polygon ON' : 'Polygon'}
+          ⬡ Polygon
         </button>
         <button
-          style={{ ...styles.topbarBtn, ...(showKeyboard ? { backgroundColor: '#4CAF50', borderColor: '#4CAF50' } : {}) }}
+          className={`tb-btn${showKeyboard ? ' on-keys' : ''}`}
           onClick={() => setShowKeyboard((v) => !v)}
-          title="Toggle keyboard shortcuts"
+          title="Symbol keyboard"
         >
           ⌨ Keys
         </button>
-        <button style={styles.topbarBtn} onClick={handleExport}>Export</button>
+        <button
+          className={`tb-btn${transliterate ? ' on-kn' : ''}`}
+          onClick={() => setTransliterate((v) => !v)}
+          title="Kannada transliteration on textareas"
+        >
+          ಕ Kannada
+        </button>
+
+        <div style={S.sep} />
+
+        {/* History */}
+        <button className="tb-btn" onClick={handleUndo} disabled={!canUndo} title="Undo (Ctrl+Z)">↩ Undo</button>
+        <button className="tb-btn" onClick={handleRedo} disabled={!canRedo} title="Redo (Ctrl+Y)">↪ Redo</button>
+
+        <div style={S.sep} />
+
+        {/* View */}
+        <button
+          className={`tb-btn${showRenderer ? ' on-preview' : ''}`}
+          onClick={() => setShowRenderer((v) => !v)}
+          title="Toggle live preview"
+        >
+          ☰ Preview
+        </button>
+
+        <div style={S.sep} />
+
+        <button className="tb-btn btn-export" onClick={handleExport}>↓ Export</button>
       </div>
 
-      {/* Polygon mode banner */}
+      {/* ── Mode banners ──────────────────────────────────────────────────── */}
       {polyMode && (
-        <div style={{ ...styles.childBanner, backgroundColor: '#E91E63' }}>
-          <span>Polygon mode — click points on canvas, double-click or click first point to close</span>
-          <button
-            onClick={() => setPolyMode(false)}
-            style={{ background: 'none', border: '1px solid rgba(255,255,255,0.6)', color: '#fff', borderRadius: '3px', padding: '2px 8px', cursor: 'pointer', fontSize: '11px' }}
-          >
-            Cancel
-          </button>
+        <div style={S.banner('#c2185b')}>
+          <span>Polygon mode — click points, double-click or click first point to close</span>
+          <button style={S.bannerBtn} onClick={() => setPolyMode(false)}>Cancel</button>
         </div>
       )}
-
-      {/* Child mode banner */}
       {addingChildFor && (
-        <div style={styles.childBanner}>
+        <div style={S.banner('#e65100')}>
           <span>
-            Drawing nested tag inside: <strong>{boxes.find(b => b.id === addingChildFor)?.tag_category || `box #${addingChildFor}`}</strong>
-            &nbsp;— draw a rectangle on the canvas
+            Nested inside: <strong>{boxes.find((b) => b.id === addingChildFor)?.tag_category || `#${addingChildFor}`}</strong>
+            {' '}— draw a box on the canvas
           </span>
-          <button
-            onClick={() => setAddingChildFor(null)}
-            style={{ background: 'none', border: '1px solid rgba(255,255,255,0.6)', color: '#fff', borderRadius: '3px', padding: '2px 8px', cursor: 'pointer', fontSize: '11px' }}
-          >
-            Cancel
-          </button>
+          <button style={S.bannerBtn} onClick={() => setAddingChildFor(null)}>Cancel</button>
         </div>
       )}
 
-      <div style={{ ...styles.body, position: 'relative' }}>
-        {/* Canvas */}
-        <div style={styles.canvasArea}>
-          {imageUrl && (
-            <ImageCanvas
-              ref={canvasRef}
-              imageUrl={imageUrl}
-              boxes={boxes}
-              selectedBoxId={selectedBoxId}
-              childMode={!!addingChildFor}
-              childParentBox={addingChildFor ? boxes.find((b) => b.id === addingChildFor) : null}
-              polyMode={polyMode}
-              onBoxCreated={handleBoxCreated}
-              onBoxSelect={handleBoxSelect}
-              onBoxDeselect={handleBoxDeselect}
-              onBoxDelete={handleBoxDelete}
-              onBoxGeomUpdate={handleBoxGeomUpdate}
-            />
-          )}
+      {/* ── Body ──────────────────────────────────────────────────────────── */}
+      <div style={{ ...S.body, position: 'relative' }}>
+
+        {/* Canvas column */}
+        <div style={{ ...S.canvasAreaBase, width: canvasColumnWidth ? `${canvasColumnWidth}px` : undefined, flex: canvasColumnWidth ? undefined : 1 }}>
+          <div style={S.canvasTitle}>{pageTitle || 'Source'}</div>
+          <div style={S.canvasBody}>
+            {imageUrl && (
+              <ImageCanvas
+                ref={canvasRef}
+                imageUrl={imageUrl}
+                boxes={boxes}
+                selectedBoxId={selectedBoxId}
+                childMode={!!addingChildFor}
+                childParentBox={addingChildFor ? boxes.find((b) => b.id === addingChildFor) : null}
+                polyMode={polyMode}
+                onBoxCreated={handleBoxCreated}
+                onBoxSelect={handleBoxSelect}
+                onBoxDeselect={handleBoxDeselect}
+                onBoxDelete={handleBoxDelete}
+                onBoxGeomUpdate={handleBoxGeomUpdate}
+                onIdealWidth={handleIdealWidth}
+              />
+            )}
+          </div>
         </div>
 
-        {/* Universal keyboard — slides in over canvas from the right */}
+        {/* Symbol keyboard overlay */}
         {showKeyboard && (
           <div style={{
-            position: 'absolute', right: PANEL_WIDTH, top: 0, bottom: 0,
-            width: 220, backgroundColor: '#fff', overflowY: 'auto',
-            borderLeft: '1px solid #ddd', boxShadow: '-3px 0 10px rgba(0,0,0,0.08)',
-            zIndex: 5,
+            position: 'absolute', right: PANEL_WIDTH, top: 0, bottom: 0, width: 220,
+            backgroundColor: '#fff', overflowY: 'auto',
+            borderLeft: '1px solid #d4d4d4', boxShadow: '-3px 0 10px rgba(0,0,0,0.08)', zIndex: 5,
           }}>
             <UniversalKeyboard />
           </div>
         )}
 
-        {/* Right panel */}
-        <div style={styles.rightPanel}>
+        {/* Right annotation panel */}
+        <div style={S.rightPanel}>
 
-          {/* Tag picker */}
           {selectedBox && tagPickingFor === selectedBox.id && (
-            <div style={{ ...styles.panelSection, padding: '12px' }}>
+            <div style={{ ...S.panelSection, padding: '12px' }}>
               <TagDropdown onPick={handleTagPicked} onCancel={() => setTagPickingFor(null)} />
             </div>
           )}
 
-          {/* Tag form */}
           {selectedBox && !tagPickingFor && selectedBox.tag_category && (
-            <div style={{ ...styles.panelSection, flex: 1, overflowY: 'auto' }}>
-              {/* Panel toolbar */}
+            <div style={{ ...S.panelSection, flex: 1, overflowY: 'auto' }}>
               <div style={{ padding: '6px 12px', display: 'flex', alignItems: 'center', gap: '6px', borderBottom: '1px solid #eee', flexWrap: 'wrap' }}>
-                <button
-                  onClick={() => setTagPickingFor(selectedBox.id)}
-                  style={{ fontSize: '11px', color: '#2196F3', background: 'none', border: 'none', cursor: 'pointer' }}
-                >
-                  Change tag
-                </button>
+                <button className="panel-link" style={{ color: '#2196F3' }} onClick={() => setTagPickingFor(selectedBox.id)}>Change tag</button>
                 <span style={{ color: '#ddd' }}>|</span>
                 <button
-                  onClick={() => {
-                    setAddingChildFor(selectedBox.id);
-                    setSelectedBoxId(null);
-                    setTagPickingFor(null);
-                  }}
-                  style={{ fontSize: '11px', color: '#FF9800', background: 'none', border: 'none', cursor: 'pointer' }}
+                  className="panel-link" style={{ color: '#e65100' }}
+                  onClick={() => { setAddingChildFor(selectedBox.id); setSelectedBoxId(null); setTagPickingFor(null); }}
                 >
-                  + Nested tag
+                  + Nested
                 </button>
                 <span style={{ color: '#ddd' }}>|</span>
-                <button
-                  onClick={handleBoxDeselect}
-                  style={{ fontSize: '11px', color: '#888', background: 'none', border: 'none', cursor: 'pointer' }}
-                >
-                  Deselect
-                </button>
+                <button className="panel-link" style={{ color: '#999' }} onClick={handleBoxDeselect}>Deselect</button>
               </div>
 
-              {/* Parent breadcrumb */}
               {parentOfSelected && (
                 <div style={{ padding: '4px 12px', fontSize: '11px', color: '#888', backgroundColor: '#fffde7', borderBottom: '1px solid #eee' }}>
-                  ↳ nested inside{' '}
-                  <span
-                    style={{ color: '#FF9800', cursor: 'pointer', textDecoration: 'underline' }}
-                    onClick={() => handleBoxSelect(parentOfSelected.id)}
-                  >
-                    {parentOfSelected.tag_category || `box #${parentOfSelected.id}`}
+                  ↳ inside{' '}
+                  <span style={{ color: '#e65100', cursor: 'pointer', textDecoration: 'underline' }} onClick={() => handleBoxSelect(parentOfSelected.id)}>
+                    {parentOfSelected.tag_category || `#${parentOfSelected.id}`}
                   </span>
                 </div>
               )}
 
-              <TagForm box={selectedBox} onUpdate={handleBoxUpdated} />
+              <TagForm box={selectedBox} onUpdate={handleBoxUpdated} transliterate={transliterate} />
             </div>
           )}
 
           {selectedBox && !tagPickingFor && !selectedBox.tag_category && (
-            <div style={{ padding: '12px', color: '#666', fontSize: '13px' }}>
+            <div style={{ padding: '12px', color: '#888', fontSize: '13px' }}>
               Select a tag type above to start annotating.
             </div>
           )}
 
-          {/* Box list */}
-          <div style={{ flex: 1, overflowY: 'auto', borderTop: selectedBox ? '1px solid #ddd' : 'none' }}>
-            <BoxList
-              boxes={boxes}
-              selectedBoxId={selectedBoxId}
-              onSelect={handleBoxSelect}
-              onDelete={handleBoxDelete}
-            />
+          <div style={{ flex: 1, overflowY: 'auto', borderTop: selectedBox ? '1px solid #eee' : 'none' }}>
+            <BoxList boxes={boxes} selectedBoxId={selectedBoxId} onSelect={handleBoxSelect} onDelete={handleBoxDelete} />
           </div>
         </div>
+
+        {/* Renderer panel */}
+        {showRenderer && (
+          <div style={S.rendererPanel}>
+            <div style={S.rendererTitle}>Live Preview</div>
+            <div style={{ flex: 1, overflowY: 'auto' }}>
+              <Renderer boxes={boxes} selectedBoxId={selectedBoxId} />
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

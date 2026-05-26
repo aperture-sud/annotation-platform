@@ -40,6 +40,11 @@ export async function getPage(id) {
   return data;
 }
 
+export async function renamePage(id, displayName) {
+  const { data } = await API.patch(`/pages/${id}`, { display_name: displayName });
+  return data;
+}
+
 export async function getPageBoxes(pageId) {
   const { data } = await API.get(`/pages/${pageId}/boxes`);
   return data;

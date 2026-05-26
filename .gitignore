@@ -12,3 +12,4 @@ frontend/dist/
 # Misc
 .env
 *.log
+CLAUDE.md
