@@ -78,6 +78,7 @@ function minBoundingRect(pts) {
 const ImageCanvas = forwardRef(function ImageCanvas({
   imageUrl, boxes, selectedBoxId, childMode, childParentBox, polyMode,
   onBoxCreated, onBoxSelect, onBoxDeselect, onBoxDelete, onBoxGeomUpdate,
+  onIdealWidth,
 }, ref) {
   const containerRef = useRef(null);
   const stageSize = useStageSize(containerRef);
@@ -96,25 +97,44 @@ const ImageCanvas = forwardRef(function ImageCanvas({
   const rectRefsMap = useRef({});
 
   // ── Layout ───────────────────────────────────────────────────────────────
+  // Fit image to the full height of the canvas, width follows aspect ratio.
+  // For landscape images that would exceed the column width, fit to width instead.
   const { width: sw, height: sh } = stageSize;
   let displayW = 0, displayH = 0, offsetX = 0, offsetY = 0;
-  if (konvaImage && sw > 0 && sh > 0) {
+  if (konvaImage && sh > 0) {
     const iw = konvaImage.naturalWidth || konvaImage.width;
     const ih = konvaImage.naturalHeight || konvaImage.height;
     if (iw > 0 && ih > 0) {
-      const imgAspect = iw / ih, ctrAspect = sw / sh;
-      if (imgAspect > ctrAspect) { displayW = sw; displayH = sw / imgAspect; }
-      else { displayH = sh; displayW = sh * imgAspect; }
-      offsetX = (sw - displayW) / 2;
-      offsetY = (sh - displayH) / 2;
+      const byHeight = sh * (iw / ih);
+      if (sw > 0 && byHeight > sw) {
+        displayW = sw;
+        displayH = sw * (ih / iw);
+      } else {
+        displayW = byHeight;
+        displayH = sh;
+      }
+      offsetX = 0;
+      offsetY = 0;
     }
   }
+  const stageH = Math.max(sh, displayH || sh);
 
   // Always-current refs so callbacks never capture stale values
   const layoutRef = useRef({ displayW, displayH, offsetX, offsetY });
   layoutRef.current = { displayW, displayH, offsetX, offsetY };
   const onBoxCreatedRef = useRef(onBoxCreated);
   onBoxCreatedRef.current = onBoxCreated;
+  const onIdealWidthRef = useRef(onIdealWidth);
+  onIdealWidthRef.current = onIdealWidth;
+
+  // Report ideal column width (height-fitted) to parent whenever image or container height changes
+  useEffect(() => {
+    if (!konvaImage || !sh) return;
+    const iw = konvaImage.naturalWidth || konvaImage.width;
+    const ih = konvaImage.naturalHeight || konvaImage.height;
+    if (!iw || !ih) return;
+    onIdealWidthRef.current?.(sh * (iw / ih));
+  }, [konvaImage, sh]);
 
   function pctToStage(x, y, w, h) {
     return { x: offsetX + x * displayW, y: offsetY + y * displayH, w: w * displayW, h: h * displayH };
@@ -308,10 +328,10 @@ const ImageCanvas = forwardRef(function ImageCanvas({
   };
 
   return (
-    <div ref={containerRef} style={{ width: '100%', height: '100%', position: 'relative' }}>
+    <div ref={containerRef} style={{ width: '100%', height: '100%', position: 'relative', overflowY: 'auto' }}>
       {sw > 0 && sh > 0 && (
         <Stage
-          width={sw} height={sh}
+          width={sw} height={stageH}
           onMouseDown={handleStageMouseDown}
           onMouseMove={handleStageMouseMove}
           onMouseUp={handleStageMouseUp}
@@ -397,8 +417,8 @@ const ImageCanvas = forwardRef(function ImageCanvas({
             {drawBox && drawBox.w > 2 && drawBox.h > 2 && (
               <Rect
                 x={drawBox.x} y={drawBox.y} width={drawBox.w} height={drawBox.h}
-                stroke={childMode ? '#FF9800' : '#fff'} strokeWidth={childMode ? 2 : 1}
-                dash={[4, 4]} fill={childMode ? 'rgba(255,152,0,0.08)' : 'rgba(255,255,255,0.05)'}
+                stroke={childMode ? '#FF9800' : '#1565C0'} strokeWidth={2}
+                dash={[5, 3]} fill={childMode ? 'rgba(255,152,0,0.08)' : 'rgba(21,101,192,0.06)'}
                 listening={false}
               />
             )}

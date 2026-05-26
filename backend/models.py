@@ -25,6 +25,7 @@ class Page(Base):
     document_id = Column(Integer, ForeignKey("documents.id"))
     page_number = Column(Integer)
     image_path = Column(String)
+    display_name = Column(String, nullable=True)
     width = Column(Integer, nullable=True)
     height = Column(Integer, nullable=True)
     status = Column(String, default="pending")
