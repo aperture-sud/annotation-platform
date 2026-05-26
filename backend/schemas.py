@@ -11,6 +11,7 @@ class BoxCreate(BaseModel):
     width: float
     height: float
     rotation: Optional[float] = None
+    polygon_points: Optional[str] = None
     tag_category: Optional[str] = None
     tag_data: Optional[str] = None
     content_text: Optional[str] = None
@@ -25,6 +26,7 @@ class BoxUpdate(BaseModel):
     width: Optional[float] = None
     height: Optional[float] = None
     rotation: Optional[float] = None
+    polygon_points: Optional[str] = None
     tag_category: Optional[str] = None
     tag_data: Optional[str] = None
     content_text: Optional[str] = None

@@ -1,7 +1,6 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { TAG_SCHEMAS } from '../tags/tagSchemas.js';
 import { updateBox } from '../api/client.js';
-import MathKeyboard from './MathKeyboard.jsx';
 
 const S = {
   form: { padding: '12px', fontSize: '13px' },
@@ -32,13 +31,12 @@ const S = {
   saved: { color: '#4CAF50', fontSize: '12px', marginTop: '4px', textAlign: 'center' },
 };
 
-function FieldRenderer({ field, value, onChange, textareaRef }) {
+function FieldRenderer({ field, value, onChange }) {
   if (field.type === 'textarea') {
     return (
       <div style={S.fieldWrapper}>
         <label style={S.label}>{field.label}{field.required ? ' *' : ''}</label>
         <textarea
-          ref={textareaRef}
           style={S.textarea}
           value={value ?? ''}
           onChange={(e) => onChange(e.target.value)}
@@ -102,25 +100,6 @@ export default function TagForm({ box, onUpdate }) {
   const [confidence, setConfidence] = useState('high');
   const [saving, setSaving] = useState(false);
   const [savedMsg, setSavedMsg] = useState(false);
-  const mathTextareaRef = useRef(null);
-  const isMathTag = box?.tag_category === 'math_inline' || box?.tag_category === 'math_block';
-
-  const insertMath = useCallback((latex, cursorOffset) => {
-    const ta = mathTextareaRef.current;
-    if (!ta) return;
-    const start = ta.selectionStart;
-    const end = ta.selectionEnd;
-    const current = ta.value;
-    const newVal = current.slice(0, start) + latex + current.slice(end);
-    // Update state
-    setField('content', newVal);
-    // Move cursor: after insertion + offset (negative = go back N chars)
-    requestAnimationFrame(() => {
-      const pos = start + latex.length + (cursorOffset || 0);
-      ta.focus();
-      ta.setSelectionRange(pos, pos);
-    });
-  }, []);
 
   // Reset form data when box changes
   useEffect(() => {
@@ -212,12 +191,8 @@ export default function TagForm({ box, onUpdate }) {
           field={field}
           value={formData[field.name] ?? (field.type === 'boolean' ? false : '')}
           onChange={(v) => setField(field.name, v)}
-          textareaRef={isMathTag && field.name === 'content' ? mathTextareaRef : null}
         />
       ))}
-
-      {/* Math keyboard for math tags */}
-      {isMathTag && <MathKeyboard onInsert={insertMath} />}
 
       {/* Illegible shortcut for text content tags */}
       {hasContentField && (

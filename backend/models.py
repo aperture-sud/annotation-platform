@@ -47,6 +47,7 @@ class Box(Base):
     tag_data = Column(Text, nullable=True)
     content_text = Column(Text, nullable=True)
     rotation = Column(Float, nullable=True)
+    polygon_points = Column(Text, nullable=True)
     reading_order = Column(Integer, nullable=True)
     confidence = Column(String, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
