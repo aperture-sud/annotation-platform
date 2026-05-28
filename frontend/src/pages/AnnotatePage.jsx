@@ -8,6 +8,7 @@ import BoxList from '../components/BoxList.jsx';
 import TagDropdown from '../components/TagDropdown.jsx';
 import TagForm from '../components/TagForm.jsx';
 import UniversalKeyboard from '../components/UniversalKeyboard.jsx';
+import FormulaKeyboard from '../components/FormulaKeyboard.jsx';
 import Renderer from '../components/Renderer.jsx';
 
 const PANEL_WIDTH = 340;
@@ -82,6 +83,7 @@ export default function AnnotatePage() {
   const [addingChildFor, setAddingChildFor] = useState(null);
   const [polyMode, setPolyMode] = useState(false);
   const [showKeyboard, setShowKeyboard] = useState(false);
+  const [showFormulas, setShowFormulas] = useState(false);
   const [showRenderer, setShowRenderer] = useState(false);
   const [transliterate, setTransliterate] = useState(false);
   const [canvasColumnWidth, setCanvasColumnWidth] = useState(null);
@@ -341,6 +343,13 @@ export default function AnnotatePage() {
           ⌨ Keys
         </button>
         <button
+          className={`tb-btn${showFormulas ? ' on-keys' : ''}`}
+          onClick={() => setShowFormulas((v) => !v)}
+          title="Formula keyboard — Chemistry, Physics, Math"
+        >
+          🧪 Formulas
+        </button>
+        <button
           className={`tb-btn${transliterate ? ' on-kn' : ''}`}
           onClick={() => setTransliterate((v) => !v)}
           title="Kannada transliteration on textareas"
@@ -417,11 +426,22 @@ export default function AnnotatePage() {
         {/* Symbol keyboard overlay */}
         {showKeyboard && (
           <div style={{
-            position: 'absolute', right: PANEL_WIDTH, top: 0, bottom: 0, width: 220,
+            position: 'absolute', right: PANEL_WIDTH + (showFormulas ? 300 : 0), top: 0, bottom: 0, width: 220,
             backgroundColor: '#fff', overflowY: 'auto',
             borderLeft: '1px solid #d4d4d4', boxShadow: '-3px 0 10px rgba(0,0,0,0.08)', zIndex: 5,
           }}>
             <UniversalKeyboard />
+          </div>
+        )}
+
+        {/* Formula keyboard overlay */}
+        {showFormulas && (
+          <div style={{
+            position: 'absolute', right: PANEL_WIDTH, top: 0, bottom: 0, width: 300,
+            backgroundColor: '#fff', display: 'flex', flexDirection: 'column',
+            borderLeft: '1px solid #d4d4d4', boxShadow: '-3px 0 10px rgba(0,0,0,0.08)', zIndex: 5,
+          }}>
+            <FormulaKeyboard />
           </div>
         )}
 

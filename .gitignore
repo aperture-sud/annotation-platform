@@ -4,10 +4,21 @@ __pycache__/
 *.pyo
 backend/*.db
 backend/uploads/
+backend/venv/
 
 # Node
 frontend/node_modules/
 frontend/dist/
+
+# Root level orphan lock
+package-lock.json
+
+# Books / PDFs and formula reference (already compiled into FormulaKeyboard.jsx)
+book/
+
+# Developer notes (not app code)
+ANALYSIS.md
+PROJECT_COMPLETE_GUIDE.md
 
 # Misc
 .env
