@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react';
 
-function insertAtCursor(text) {
+function insertAtCursor(text, cursorOffset = 0) {
   const el = document.activeElement;
   if (!el || (el.tagName !== 'TEXTAREA' && el.tagName !== 'INPUT')) return;
   const start = el.selectionStart ?? el.value.length;
@@ -9,7 +9,7 @@ function insertAtCursor(text) {
   const proto  = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
   const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
   if (setter) { setter.call(el, newVal); el.dispatchEvent(new Event('input', { bubbles: true })); }
-  requestAnimationFrame(() => { const pos = start + text.length; el.setSelectionRange(pos, pos); el.focus(); });
+  requestAnimationFrame(() => { const pos = start + text.length + cursorOffset; el.setSelectionRange(pos, pos); el.focus(); });
 }
 
 // ─── CHEMISTRY ───────────────────────────────────────────────────────────────
@@ -893,6 +893,41 @@ const MATH = [
 // ─── SYMBOLS ─────────────────────────────────────────────────────────────────
 const SYMBOLS = [
   {
+    group: 'Formatting',
+    items: [
+      { label: 'under',  insert: '\\underline{}', offset: -1 },
+      { label: 'bold',   insert: '\\textbf{}',    offset: -1 },
+      { label: 'italic', insert: '\\textit{}',    offset: -1 },
+      { label: 'strike', insert: '\\sout{}',      offset: -1 },
+      { label: 'circle', insert: '\\circle{}',    offset: -1 },
+      { label: 'over',   insert: '\\overline{}',  offset: -1 },
+    ],
+  },
+  {
+    group: 'Structure',
+    items: [
+      { label: 'xⁿ',  insert: '^{}',        offset: -1 },
+      { label: 'xₙ',  insert: '_{}',        offset: -1 },
+      { label: 'a/b', insert: '\\frac{}{}', offset: -3 },
+      { label: '√',   insert: '\\sqrt{}',   offset: -1 },
+      { label: 'vec', insert: '\\vec{}',    offset: -1 },
+      { label: 'hat', insert: '\\hat{}',    offset: -1 },
+    ],
+  },
+  {
+    group: 'Functions',
+    items: [
+      { label: 'sin', insert: '\\sin' },
+      { label: 'cos', insert: '\\cos' },
+      { label: 'tan', insert: '\\tan' },
+      { label: 'log', insert: '\\log' },
+      { label: 'ln',  insert: '\\ln' },
+      { label: 'lim', insert: '\\lim_{}',    offset: -1 },
+      { label: 'Σ',   insert: '\\sum_{}^{}', offset: -3 },
+      { label: '∫',   insert: '\\int_{}^{}', offset: -3 },
+    ],
+  },
+  {
     group: 'Reaction Arrows',
     items: [
       { label: '→',           insert: '\\rightarrow' },
@@ -923,6 +958,7 @@ const SYMBOLS = [
       { label: 'β',   insert: '\\beta' },
       { label: 'γ',   insert: '\\gamma' },
       { label: 'δ',   insert: '\\delta' },
+      { label: 'ε',   insert: '\\epsilon' },
       { label: 'θ',   insert: '\\theta' },
       { label: 'λ',   insert: '\\lambda' },
       { label: 'μ',   insert: '\\mu' },
@@ -933,6 +969,7 @@ const SYMBOLS = [
       { label: 'Σ',   insert: '\\Sigma' },
       { label: 'Δ',   insert: '\\Delta' },
       { label: 'Ω',   insert: '\\Omega' },
+      { label: 'Λ',   insert: '\\Lambda' },
     ],
   },
   {
@@ -953,8 +990,10 @@ const SYMBOLS = [
       { label: '∓',         insert: '\\mp' },
       { label: '×',         insert: '\\times' },
       { label: '÷',         insert: '\\div' },
+      { label: '·',         insert: '\\cdot' },
       { label: '≠',         insert: '\\ne' },
       { label: '≈',         insert: '\\approx' },
+      { label: '≡',         insert: '\\equiv' },
       { label: '≤',         insert: '\\le' },
       { label: '≥',         insert: '\\ge' },
       { label: '∝',         insert: '\\propto' },
@@ -991,6 +1030,37 @@ const SYMBOLS = [
       { label: '10⁻³',      insert: '10^{-3}' },
       { label: '10⁻¹⁹',     insert: '10^{-19}' },
       { label: '10⁻³¹',     insert: '10^{-31}' },
+    ],
+  },
+  {
+    group: 'Sets & Logic',
+    items: [
+      { label: '∈',  insert: '\\in' },
+      { label: '∉',  insert: '\\notin' },
+      { label: '⊂',  insert: '\\subset' },
+      { label: '⊃',  insert: '\\supset' },
+      { label: '⊆',  insert: '\\subseteq' },
+      { label: '∪',  insert: '\\cup' },
+      { label: '∩',  insert: '\\cap' },
+      { label: '∅',  insert: '\\emptyset' },
+      { label: '∀',  insert: '\\forall' },
+      { label: '∃',  insert: '\\exists' },
+      { label: '¬',  insert: '\\neg' },
+      { label: '∧',  insert: '\\wedge' },
+      { label: '∨',  insert: '\\vee' },
+      { label: '→',  insert: '\\rightarrow' },
+      { label: '⟺',  insert: '\\Leftrightarrow' },
+    ],
+  },
+  {
+    group: 'Brackets',
+    items: [
+      { label: '(…)', insert: '\\left(\\right)',     offset: -7 },
+      { label: '[…]', insert: '\\left[\\right]',     offset: -7 },
+      { label: '{…}', insert: '\\left\\{\\right\\}', offset: -8 },
+      { label: '|…|', insert: '\\left|\\right|',     offset: -7 },
+      { label: '⌊…⌋', insert: '\\lfloor \\rfloor',  offset: -7 },
+      { label: '⌈…⌉', insert: '\\lceil \\rceil',    offset: -6 },
     ],
   },
 ];
@@ -1071,7 +1141,7 @@ export default function FormulaKeyboard() {
                   <button
                     key={item.insert}
                     style={getBtnStyle(activeTab, section.group)}
-                    onClick={() => insertAtCursor(item.insert)}
+                    onClick={() => insertAtCursor(item.insert, item.offset ?? 0)}
                     title={item.insert}
                   >
                     {item.label}
