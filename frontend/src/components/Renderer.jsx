@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState, useEffect, useLayoutEffect } from 'react';
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
+import 'katex/contrib/mhchem';
 import { getTagColour } from '../tags/tagSchemas.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -59,24 +60,85 @@ function parseInline(text) {
   };
 
   while (i < text.length) {
+    // $...$ inline math
     if (text[i] === '$') {
       const end = text.indexOf('$', i + 1);
       if (end !== -1) { parts.push(mathInline(text.slice(i + 1, end), key++)); i = end + 1; continue; }
     }
+
+    // \command — known formatting first, then KaTeX for everything else
     if (text[i] === '\\') {
-      const m = text.slice(i + 1).match(/^([a-zA-Z]+)\{/);
+      const m = text.slice(i + 1).match(/^([a-zA-Z]+)/);
       if (m) {
-        const bs = i + 1 + m[1].length + 1;
-        const inner = extractBraceContent(text, bs);
-        if (inner !== null && CMDS[m[1]]) {
-          parts.push(CMDS[m[1]](parseInline(inner)));
-          i = bs + inner.length + 1;
-          continue;
+        const cmdName = m[1];
+        const afterCmd = i + 1 + cmdName.length;
+
+        // Known formatting commands that take one {arg}
+        if (text[afterCmd] === '{' && CMDS[cmdName]) {
+          const inner = extractBraceContent(text, afterCmd + 1);
+          if (inner !== null) {
+            parts.push(CMDS[cmdName](parseInline(inner)));
+            i = afterCmd + 1 + inner.length + 1;
+            continue;
+          }
         }
+
+        // All other \commands: collect consecutive {brace} groups and send to KaTeX
+        // This handles \frac{1}{2}, \sqrt{x}, \rightarrow, \alpha, \xrightarrow{\text{...}}, etc.
+        let mathExpr = `\\${cmdName}`;
+        let j = afterCmd;
+        while (j < text.length && text[j] === '{') {
+          const inner = extractBraceContent(text, j + 1);
+          if (inner === null) break;
+          mathExpr += `{${inner}}`;
+          j = j + 1 + inner.length + 1;
+        }
+        try {
+          parts.push(<span key={key++} dangerouslySetInnerHTML={{ __html: katex.renderToString(mathExpr, { throwOnError: true }) }} />);
+          i = j;
+        } catch {
+          parts.push(<span key={key++} style={{ color: '#aaa', fontFamily: 'monospace', fontSize: '0.85em' }}>{mathExpr}</span>);
+          i = j;
+        }
+        continue;
       }
     }
+
+    // _subscript  e.g. H_2O  Ca(OH)_2  SO_{4}
+    if (text[i] === '_') {
+      let sub, end;
+      if (text[i + 1] === '{') {
+        const inner = extractBraceContent(text, i + 2);
+        if (inner !== null) { sub = inner; end = i + 2 + inner.length + 1; }
+      } else if (text[i + 1] !== undefined && /[a-zA-Z0-9+\-]/.test(text[i + 1])) {
+        sub = text[i + 1]; end = i + 2;
+      }
+      if (sub !== undefined) {
+        parts.push(<sub key={key++} style={{ fontSize: '0.78em', lineHeight: 1 }}>{sub}</sub>);
+        i = end;
+        continue;
+      }
+    }
+
+    // ^superscript  e.g. Ca^{2+}  Fe^3+  x^2
+    if (text[i] === '^') {
+      let sup, end;
+      if (text[i + 1] === '{') {
+        const inner = extractBraceContent(text, i + 2);
+        if (inner !== null) { sup = inner; end = i + 2 + inner.length + 1; }
+      } else if (text[i + 1] !== undefined && /[a-zA-Z0-9+\-]/.test(text[i + 1])) {
+        sup = text[i + 1]; end = i + 2;
+      }
+      if (sup !== undefined) {
+        parts.push(<sup key={key++} style={{ fontSize: '0.78em', lineHeight: 1 }}>{sup}</sup>);
+        i = end;
+        continue;
+      }
+    }
+
+    // Plain text — accumulate until the next special character
     let j = i + 1;
-    while (j < text.length && text[j] !== '\\' && text[j] !== '$') j++;
+    while (j < text.length && text[j] !== '\\' && text[j] !== '$' && text[j] !== '_' && text[j] !== '^') j++;
     parts.push(<span key={key++}>{text.slice(i, j)}</span>);
     i = j;
   }
@@ -153,7 +215,7 @@ function Tag({ box, children }) {
   // ── Math ──────────────────────────────────────────────────────────────────
 
   if (tag === 'math_inline') return (
-    <div style={{ margin: '0.4em 0' }}>{mathInline(content, 'mi')}</div>
+    <span style={{ margin: '0 0.15em' }}>{mathInline(content, 'mi')}</span>
   );
   if (tag === 'math_block') return mathBlock(content);
 
