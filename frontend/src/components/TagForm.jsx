@@ -1,4 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
+import katex from 'katex';
+import 'katex/dist/katex.min.css';
+import 'katex/contrib/mhchem';
 import { TAG_SCHEMAS } from '../tags/tagSchemas.js';
 import { updateBox } from '../api/client.js';
 import getCaretCoordinates from 'textarea-caret';
@@ -31,6 +34,32 @@ const S = {
   },
   saved: { color: '#4CAF50', fontSize: '12px', marginTop: '4px', textAlign: 'center' },
 };
+
+const MATH_TAGS = new Set(['math_inline', 'math_block', 'ce']);
+
+function KatexPreview({ tag, content }) {
+  if (!content) return null;
+  let html;
+  try {
+    if (tag === 'ce') {
+      html = katex.renderToString(`\\ce{${content}}`, { throwOnError: false });
+    } else {
+      html = katex.renderToString(content, { throwOnError: false, displayMode: tag === 'math_block' });
+    }
+  } catch {
+    return (
+      <div style={{ margin: '2px 0 8px', padding: '6px 10px', backgroundColor: '#fff5f5', border: '1px solid #ffcdd2', borderRadius: '4px', color: '#c62828', fontSize: '11px', fontFamily: 'monospace' }}>
+        Invalid LaTeX
+      </div>
+    );
+  }
+  return (
+    <div style={{ margin: '2px 0 8px', padding: '8px 10px', backgroundColor: '#f5f5ff', border: '1px solid #e0e0f0', borderRadius: '4px' }}>
+      <div style={{ fontSize: '10px', color: '#888', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Preview</div>
+      <div dangerouslySetInnerHTML={{ __html: html }} />
+    </div>
+  );
+}
 
 function KannadaTextarea({ value, onChange, style, placeholder }) {
   const taRef = useRef(null);
@@ -329,6 +358,11 @@ export default function TagForm({ box, onUpdate, transliterate }) {
           transliterate={transliterate}
         />
       ))}
+
+      {/* Live KaTeX preview for math / chemistry tags */}
+      {MATH_TAGS.has(box.tag_category) && (
+        <KatexPreview tag={box.tag_category} content={formData.content || ''} />
+      )}
 
       {/* Illegible shortcut for text content tags */}
       {hasContentField && (
