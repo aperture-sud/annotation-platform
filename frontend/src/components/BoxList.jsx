@@ -17,6 +17,11 @@ const S = {
   itemTag: { fontSize: '12px', fontWeight: '600', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   itemPreview: { fontSize: '11px', color: '#888', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: '1px' },
   order: { fontSize: '11px', color: '#bbb', flexShrink: 0 },
+  chip: (colour) => ({
+    fontSize: '10px', fontWeight: '700', padding: '1px 6px', borderRadius: '10px',
+    backgroundColor: colour + '22', color: colour, border: `1px solid ${colour}55`,
+    whiteSpace: 'nowrap', flexShrink: 0,
+  }),
   deleteBtn: {
     padding: '2px 7px', fontSize: '11px', color: '#F44336',
     border: '1px solid #F44336', borderRadius: '3px', cursor: 'pointer',
@@ -27,7 +32,7 @@ const S = {
 
 function BoxItem({ box, depth, selectedBoxId, onSelect, onDelete }) {
   const schema = TAG_SCHEMAS[box.tag_category];
-  const colour = schema?.colour || '#bbb';
+  const colour = schema?.colour || '#111111';
   const isSelected = box.id === selectedBoxId;
 
   return (
@@ -50,7 +55,15 @@ function BoxItem({ box, depth, selectedBoxId, onSelect, onDelete }) {
           <div style={S.itemPreview}>{box.content_text.substring(0, 50)}</div>
         )}
       </div>
-      <span style={S.order}>#{box.reading_order ?? '—'}</span>
+      {isSelected && box.tag_category && (
+        <span style={S.chip(colour)}>
+          {schema?.label || box.tag_category}
+          {box.reading_order != null ? ` #${box.reading_order}` : ''}
+        </span>
+      )}
+      {!isSelected && (
+        <span style={S.order}>#{box.reading_order ?? '—'}</span>
+      )}
       <button
         style={S.deleteBtn}
         onClick={(e) => { e.stopPropagation(); onDelete(box.id); }}

@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
-  getPage, getPageBoxes, createBox, updateBox, deleteBox, exportPage, renamePage, IMAGE_BASE_URL,
+  getPage, getPageBoxes, createBox, updateBox, deleteBox, exportPage, renamePage,
+  submitPage, coordsToCoordinates, normalizeBox, IMAGE_BASE_URL,
 } from '../api/client.js';
+import { useAuth } from '../context/AuthContext.jsx';
 import ImageCanvas from '../components/ImageCanvas.jsx';
 import BoxList from '../components/BoxList.jsx';
 import TagDropdown from '../components/TagDropdown.jsx';
@@ -33,10 +35,10 @@ const S = {
   canvasAreaBase: {
     flexShrink: 0, display: 'flex', flexDirection: 'column',
   },
-  canvasTitle: {
+  colTitle: {
     padding: '0 14px', height: '34px', display: 'flex', alignItems: 'center',
-    borderBottom: '1px solid #d4d4d4', fontSize: '13px', fontWeight: 600,
-    color: '#333', flexShrink: 0, backgroundColor: '#f2f2f2',
+    borderBottom: '1px solid #d4d4d4', fontSize: '12px', fontWeight: 600,
+    color: '#444', flexShrink: 0, backgroundColor: '#f2f2f2',
   },
   canvasBody: {
     flex: 1, overflow: 'hidden', padding: '12px', backgroundColor: '#e8e8e8',
@@ -54,12 +56,6 @@ const S = {
     borderLeft: '1px solid #d4d4d4', boxShadow: '-2px 0 8px rgba(0,0,0,0.05)',
     display: 'flex', flexDirection: 'column', overflow: 'hidden',
   },
-  rendererTitle: {
-    padding: '0 14px', height: '34px', display: 'flex', alignItems: 'center',
-    borderBottom: '1px solid #d8d8d8', fontSize: '11px', fontWeight: 700,
-    color: '#444', letterSpacing: '0.08em', textTransform: 'uppercase',
-    flexShrink: 0, backgroundColor: '#f2f2f2',
-  },
 
   banner: (color) => ({
     padding: '6px 14px', backgroundColor: color, color: '#fff',
@@ -73,8 +69,9 @@ const S = {
 };
 
 export default function AnnotatePage() {
-  const { pageId } = useParams();
+  const { pageName } = useParams();
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [page, setPage] = useState(null);
   const [boxes, setBoxes] = useState([]);
   const [selectedBoxId, setSelectedBoxId] = useState(null);
@@ -88,6 +85,10 @@ export default function AnnotatePage() {
   const [pageTitle, setPageTitle] = useState('');
   const [editingTitle, setEditingTitle] = useState(false);
   const canvasRef = useRef(null);
+  const lockedRef = useRef(false);
+
+  const locked = page?.status === 'approved' && user?.role !== 'admin';
+  lockedRef.current = locked;
 
   const handleIdealWidth = useCallback((w) => {
     setCanvasColumnWidth((prev) => {
@@ -126,11 +127,11 @@ export default function AnnotatePage() {
     setCanRedo(redoStack.current.length > 0);
   }, []);
 
-  useEffect(() => { loadPage(); }, [pageId]);
+  useEffect(() => { loadPage(); }, [pageName]);
 
   async function loadPage() {
     try {
-      const [pg, bxs] = await Promise.all([getPage(pageId), getPageBoxes(pageId)]);
+      const [pg, bxs] = await Promise.all([getPage(pageName), getPageBoxes(pageName)]);
       setPage(pg);
       setPageTitle(pg.display_name || `p.${pg.page_number}`);
       setBoxes(bxs);
@@ -142,9 +143,25 @@ export default function AnnotatePage() {
   async function commitTitle(val) {
     const trimmed = val.trim();
     if (!trimmed) return;
-    setPageTitle(trimmed);
     setEditingTitle(false);
-    try { await renamePage(pageId, trimmed); } catch (e) { console.error('Rename failed', e); }
+    if (trimmed === pageName) return;
+    try {
+      const res = await renamePage(pageName, trimmed);
+      if (res.ok) {
+        navigate(`/annotate/${encodeURIComponent(trimmed)}`, { replace: true });
+      } else if (res.conflict) {
+        const doReplace = window.confirm(`${res.message}\n\nReplace the existing page?`);
+        if (doReplace) {
+          const res2 = await renamePage(pageName, trimmed, true);
+          if (res2.ok) navigate(`/annotate/${encodeURIComponent(trimmed)}`, { replace: true });
+        } else {
+          setPageTitle(pageName);
+        }
+      }
+    } catch (e) {
+      console.error('Rename failed', e);
+      setPageTitle(pageName);
+    }
   }
 
   useEffect(() => {
@@ -158,55 +175,97 @@ export default function AnnotatePage() {
     return () => window.removeEventListener('keydown', onKey);
   }, [handleUndo, handleRedo]);
 
-  const handleBoxCreated = useCallback(async (coords) => {
-    try {
-      const maxOrder = boxes.reduce((max, b) => b.reading_order != null ? Math.max(max, b.reading_order) : max, 0);
-      const payload = {
-        page_id: Number(pageId), ...coords, reading_order: maxOrder + 1,
-        ...(addingChildFor ? { parent_box_id: addingChildFor } : {}),
-      };
-      const newBox = await createBox(payload);
-      setBoxes((prev) => [...prev, newBox]);
-      setSelectedBoxId(newBox.id);
-      setTagPickingFor(newBox.id);
-      setAddingChildFor(null);
-      setPolyMode(false);
+  const handleBoxCreated = useCallback((coords) => {
+    if (lockedRef.current) return;
+    const maxOrder = boxes.reduce((max, b) => b.reading_order != null ? Math.max(max, b.reading_order) : max, 0);
+    const coordinates = coordsToCoordinates(coords);
+    const tempId = -Date.now();
+    const pending = {
+      ...normalizeBox({ coordinates, parent_id: addingChildFor || null }),
+      id: tempId,
+      coordinates,
+      reading_order: maxOrder + 1,
+      tag_category: null,
+      tag_data: null,
+      content_text: null,
+      confidence: 'high',
+    };
+    setBoxes((prev) => [...prev, pending]);
+    setSelectedBoxId(tempId);
+    setTagPickingFor(tempId);
+    setAddingChildFor(null);
+    setPolyMode(false);
+  }, [addingChildFor, boxes]);
 
-      let trackedBox = newBox;
+  const handleBoxCreate = useCallback(async (formPayload) => {
+    if (lockedRef.current) return;
+    const pendingBox = boxes.find((b) => b.id === selectedBoxId);
+    if (!pendingBox || selectedBoxId >= 0) return;
+    try {
+      const newBox = await createBox(pageName, {
+        coordinates: pendingBox.coordinates,
+        parent_id: pendingBox.parent_id || null,
+        reading_order: pendingBox.reading_order,
+        ...formPayload,
+      });
+      setBoxes((prev) => prev.map((b) => (b.id === selectedBoxId ? newBox : b)));
+      setSelectedBoxId(newBox.id);
+
+      let tracked = newBox;
       recordAction(
         async () => {
-          await deleteBox(trackedBox.id);
-          setBoxes((prev) => prev.filter((b) => b.id !== trackedBox.id));
-          setSelectedBoxId((s) => s === trackedBox.id ? null : s);
-          setTagPickingFor((t) => t === trackedBox.id ? null : t);
+          await deleteBox(pageName, tracked.id);
+          setBoxes((prev) => prev.filter((b) => b.id !== tracked.id));
+          setSelectedBoxId((s) => s === tracked.id ? null : s);
+          setTagPickingFor((t) => t === tracked.id ? null : t);
         },
         async () => {
-          const { id: _, created_at, ...data } = trackedBox;
-          const recreated = await createBox(data);
-          trackedBox = recreated;
+          const { id: _, created_at, x, y, width, height, rotation, polygon_points, parent_box_id, ...data } = tracked;
+          const recreated = await createBox(pageName, data);
+          tracked = recreated;
           setBoxes((prev) => [...prev, recreated]);
           setSelectedBoxId(recreated.id);
         },
       );
     } catch (e) {
       console.error('Failed to create box', e);
+      alert('Failed to save box. Is the backend running?');
     }
-  }, [pageId, addingChildFor, boxes]);
+  }, [pageName, selectedBoxId, boxes]);
+
+  const handleBoxDiscard = useCallback(() => {
+    if (selectedBoxId >= 0) return;
+    setBoxes((prev) => prev.filter((b) => b.id !== selectedBoxId));
+    setSelectedBoxId(null);
+    setTagPickingFor(null);
+    setAddingChildFor(null);
+  }, [selectedBoxId]);
 
   const handleBoxSelect = useCallback((id) => {
+    if (selectedBoxId < 0 && id !== selectedBoxId)
+      setBoxes((prev) => prev.filter((b) => b.id !== selectedBoxId));
     setSelectedBoxId(id);
     setAddingChildFor(null);
     const box = boxes.find((b) => b.id === id);
     setTagPickingFor(box && !box.tag_category ? id : null);
-  }, [boxes]);
+  }, [boxes, selectedBoxId]);
 
   const handleBoxDeselect = useCallback(() => {
+    if (selectedBoxId < 0)
+      setBoxes((prev) => prev.filter((b) => b.id !== selectedBoxId));
     setSelectedBoxId(null);
     setTagPickingFor(null);
     setAddingChildFor(null);
-  }, []);
+  }, [selectedBoxId]);
 
   const handleBoxDelete = useCallback(async (id) => {
+    if (id < 0) {
+      if (lockedRef.current) return;
+      setBoxes((prev) => prev.filter((b) => b.id !== id));
+      if (id === selectedBoxId) { setSelectedBoxId(null); setTagPickingFor(null); setAddingChildFor(null); }
+      return;
+    }
+    if (lockedRef.current) return;
     try {
       function collectDescendants(boxId) {
         const children = boxes.filter((b) => b.parent_box_id === boxId);
@@ -218,7 +277,7 @@ export default function AnnotatePage() {
       const allToDelete = [...descendants, rootBox];
       const deletedIds = new Set(allToDelete.map((b) => b.id));
 
-      for (const box of allToDelete) await deleteBox(box.id);
+      for (const box of allToDelete) await deleteBox(pageName, box.id);
       setBoxes((prev) => prev.filter((b) => !deletedIds.has(b.id)));
       if (deletedIds.has(selectedBoxId)) {
         setSelectedBoxId(null); setTagPickingFor(null); setAddingChildFor(null);
@@ -229,21 +288,21 @@ export default function AnnotatePage() {
         async () => {
           const idMap = {};
           for (const b of [...trackedDeleted].reverse()) {
-            const { id: oldId, created_at, ...data } = b;
-            if (data.parent_box_id && idMap[data.parent_box_id] !== undefined)
-              data.parent_box_id = idMap[data.parent_box_id];
-            const newBox = await createBox(data);
+            const { id: oldId, created_at, x, y, width, height, rotation, polygon_points, parent_box_id, ...data } = b;
+            if (data.parent_id && idMap[data.parent_id] !== undefined)
+              data.parent_id = idMap[data.parent_id];
+            const newBox = await createBox(pageName, data);
             idMap[oldId] = newBox.id;
             setBoxes((prev) => [...prev, newBox]);
           }
           trackedDeleted = trackedDeleted.map((b) => ({
             ...b, id: idMap[b.id] ?? b.id,
-            parent_box_id: b.parent_box_id && idMap[b.parent_box_id] !== undefined
-              ? idMap[b.parent_box_id] : b.parent_box_id,
+            parent_id: b.parent_id && idMap[b.parent_id] !== undefined
+              ? idMap[b.parent_id] : b.parent_id,
           }));
         },
         async () => {
-          for (const b of trackedDeleted) { try { await deleteBox(b.id); } catch {} }
+          for (const b of trackedDeleted) { try { await deleteBox(pageName, b.id); } catch {} }
           const ids = new Set(trackedDeleted.map((b) => b.id));
           setBoxes((prev) => prev.filter((b) => !ids.has(b.id)));
         },
@@ -251,22 +310,31 @@ export default function AnnotatePage() {
     } catch (e) {
       console.error('Failed to delete box', e);
     }
-  }, [selectedBoxId, boxes]);
+  }, [pageName, selectedBoxId, boxes]);
 
   const handleBoxGeomUpdate = useCallback(async (id, coords) => {
+    if (lockedRef.current) return;
+    if (id < 0) {
+      const newCoordinates = coordsToCoordinates(coords);
+      setBoxes((prev) => prev.map((b) => b.id !== id ? b : {
+        ...b, ...normalizeBox({ ...b, coordinates: newCoordinates }), id, coordinates: newCoordinates,
+      }));
+      return;
+    }
     try {
       const oldBox = boxes.find((b) => b.id === id);
-      const updated = await updateBox(id, coords);
+      const oldCoordinates = oldBox?.coordinates;
+      const newCoordinates = coordsToCoordinates(coords);
+      const updated = await updateBox(pageName, id, { coordinates: newCoordinates });
       setBoxes((prev) => prev.map((b) => (b.id === id ? updated : b)));
       if (oldBox) {
-        const oldCoords = { x: oldBox.x, y: oldBox.y, width: oldBox.width, height: oldBox.height, rotation: oldBox.rotation };
         recordAction(
-          async () => { const r = await updateBox(id, oldCoords); setBoxes((prev) => prev.map((b) => b.id === id ? r : b)); },
-          async () => { const r = await updateBox(id, coords);    setBoxes((prev) => prev.map((b) => b.id === id ? r : b)); },
+          async () => { const r = await updateBox(pageName, id, { coordinates: oldCoordinates }); setBoxes((prev) => prev.map((b) => b.id === id ? r : b)); },
+          async () => { const r = await updateBox(pageName, id, { coordinates: newCoordinates }); setBoxes((prev) => prev.map((b) => b.id === id ? r : b)); },
         );
       }
     } catch (e) { console.error('Failed to update box geometry', e); }
-  }, [boxes]);
+  }, [pageName, boxes]);
 
   function handleTagPicked(tagType) {
     const id = tagPickingFor;
@@ -276,26 +344,27 @@ export default function AnnotatePage() {
   }
 
   function handleBoxUpdated(updatedBox) {
+    if (lockedRef.current) return;
     const oldBox = boxes.find((b) => b.id === updatedBox.id);
     setBoxes((prev) => prev.map((b) => (b.id === updatedBox.id ? updatedBox : b)));
     if (oldBox) {
       const snap = { ...oldBox }, newSnap = { ...updatedBox };
-      const fields = ['tag_category', 'tag_data', 'content_text', 'reading_order', 'confidence'];
+      const fields = ['tag_category', 'tag_attributes', 'content_text', 'reading_order', 'confidence'];
       const extract = (b) => Object.fromEntries(fields.map((f) => [f, b[f]]));
       recordAction(
-        async () => { const r = await updateBox(snap.id, extract(snap)); setBoxes((prev) => prev.map((b) => b.id === snap.id ? r : b)); },
-        async () => { const r = await updateBox(newSnap.id, extract(newSnap)); setBoxes((prev) => prev.map((b) => b.id === newSnap.id ? r : b)); },
+        async () => { const r = await updateBox(pageName, snap.id, extract(snap)); setBoxes((prev) => prev.map((b) => b.id === snap.id ? r : b)); },
+        async () => { const r = await updateBox(pageName, newSnap.id, extract(newSnap)); setBoxes((prev) => prev.map((b) => b.id === newSnap.id ? r : b)); },
       );
     }
   }
 
   async function handleExport() {
     try {
-      const text = await exportPage(pageId);
+      const text = await exportPage(pageName);
       const blob = new Blob([text], { type: 'text/plain' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = url; a.download = `${pageTitle || `page_${pageId}`}.txt`; a.click();
+      a.href = url; a.download = `${pageTitle || pageName}.txt`; a.click();
       URL.revokeObjectURL(url);
     } catch (e) { console.error('Export failed', e); }
   }
@@ -319,16 +388,27 @@ export default function AnnotatePage() {
             onKeyDown={(e) => { if (e.key === 'Enter') commitTitle(e.target.value); if (e.key === 'Escape') setEditingTitle(false); }}
           />
         ) : (
-          <span style={{ ...S.title, cursor: 'text' }} title="Click to rename" onClick={() => setEditingTitle(true)}>
+          <span style={{ ...S.title, cursor: locked ? 'default' : 'text' }} title={locked ? undefined : 'Click to rename'}
+            onClick={() => { if (!locked) setEditingTitle(true); }}>
             {pageTitle || 'Loading…'}
+          </span>
+        )}
+        {page?.status === 'pending_approval' && (
+          <span style={{ fontSize: '11px', backgroundColor: '#fff3e0', color: '#e65100', padding: '2px 8px', borderRadius: '10px', fontWeight: 600, flexShrink: 0 }}>
+            Approval pending
+          </span>
+        )}
+        {page?.status === 'approved' && (
+          <span style={{ fontSize: '11px', backgroundColor: '#e8f5e9', color: '#1b5e20', padding: '2px 8px', borderRadius: '10px', fontWeight: 600, flexShrink: 0 }}>
+            Approved
           </span>
         )}
         <div style={S.spacer} />
 
-        {/* Drawing tools */}
         <button
           className={`tb-btn${polyMode ? ' on-poly' : ''}`}
-          onClick={() => setPolyMode((v) => !v)}
+          onClick={() => { if (!locked) setPolyMode((v) => !v); }}
+          disabled={locked}
           title="Polygon drawing mode"
         >
           ⬡ Polygon
@@ -350,13 +430,11 @@ export default function AnnotatePage() {
 
         <div style={S.sep} />
 
-        {/* History */}
         <button className="tb-btn" onClick={handleUndo} disabled={!canUndo} title="Undo (Ctrl+Z)">↩ Undo</button>
         <button className="tb-btn" onClick={handleRedo} disabled={!canRedo} title="Redo (Ctrl+Y)">↪ Redo</button>
 
         <div style={S.sep} />
 
-        {/* View */}
         <button
           className={`tb-btn${showRenderer ? ' on-preview' : ''}`}
           onClick={() => setShowRenderer((v) => !v)}
@@ -377,6 +455,11 @@ export default function AnnotatePage() {
           <button style={S.bannerBtn} onClick={() => setPolyMode(false)}>Cancel</button>
         </div>
       )}
+      {locked && (
+        <div style={S.banner('#546e7a')}>
+          <span>This page is approved and locked.</span>
+        </div>
+      )}
       {addingChildFor && (
         <div style={S.banner('#e65100')}>
           <span>
@@ -392,7 +475,7 @@ export default function AnnotatePage() {
 
         {/* Canvas column */}
         <div style={{ ...S.canvasAreaBase, width: canvasColumnWidth ? `${canvasColumnWidth}px` : undefined, flex: canvasColumnWidth ? undefined : 1 }}>
-          <div style={S.canvasTitle}>{pageTitle || 'Source'}</div>
+          <div style={S.colTitle}>{pageTitle || 'Source'}</div>
           <div style={S.canvasBody}>
             {imageUrl && (
               <ImageCanvas
@@ -427,6 +510,7 @@ export default function AnnotatePage() {
 
         {/* Right annotation panel */}
         <div style={S.rightPanel}>
+          <div style={S.colTitle}>Boxes</div>
 
           {selectedBox && tagPickingFor === selectedBox.id && (
             <div style={{ ...S.panelSection, padding: '12px' }}>
@@ -458,7 +542,10 @@ export default function AnnotatePage() {
                 </div>
               )}
 
-              <TagForm box={selectedBox} onUpdate={handleBoxUpdated} transliterate={transliterate} />
+              <TagForm
+                box={selectedBox} pageName={pageName} onUpdate={handleBoxUpdated} transliterate={transliterate}
+                isPending={selectedBoxId < 0} onCreate={handleBoxCreate} onDiscard={handleBoxDiscard}
+              />
             </div>
           )}
 
@@ -476,9 +563,9 @@ export default function AnnotatePage() {
         {/* Renderer panel */}
         {showRenderer && (
           <div style={S.rendererPanel}>
-            <div style={S.rendererTitle}>Live Preview</div>
+            <div style={S.colTitle}>Live Preview</div>
             <div style={{ flex: 1, overflowY: 'auto' }}>
-              <Renderer boxes={boxes} selectedBoxId={selectedBoxId} />
+              <Renderer boxes={boxes} selectedBoxId={selectedBoxId} onSelect={handleBoxSelect} />
             </div>
           </div>
         )}

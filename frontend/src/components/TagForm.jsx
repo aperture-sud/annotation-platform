@@ -257,7 +257,7 @@ function FieldRenderer({ field, value, onChange, transliterate }) {
   return null;
 }
 
-export default function TagForm({ box, onUpdate, transliterate }) {
+export default function TagForm({ box, pageName, onUpdate, transliterate, isPending, onCreate, onDiscard }) {
   const schema = TAG_SCHEMAS[box?.tag_category];
   const [formData, setFormData] = useState({});
   const [readingOrder, setReadingOrder] = useState('');
@@ -265,24 +265,24 @@ export default function TagForm({ box, onUpdate, transliterate }) {
   const [saving, setSaving] = useState(false);
   const [savedMsg, setSavedMsg] = useState(false);
 
-  // Reset form data when box changes
   useEffect(() => {
     if (!box) return;
+    const raw = box.tag_data || box.tag_attributes;
+    let parsed = {};
     try {
-      setFormData(box.tag_data ? JSON.parse(box.tag_data) : {});
+      parsed = raw ? JSON.parse(raw) : {};
     } catch {
-      setFormData({});
+      parsed = {};
     }
+    // Fall back to content_text for boxes saved before tag_attributes was wired up
+    if (!parsed.content && !parsed.source_text && box.content_text) {
+      parsed = { ...parsed, content: box.content_text };
+    }
+    setFormData(parsed);
+    setReadingOrder(box.reading_order ?? '');
     setConfidence(box.confidence || 'high');
     setSavedMsg(false);
   }, [box?.id]);
-
-  // Keep reading order in sync whenever it's assigned (e.g. auto-assigned after creation)
-  useEffect(() => {
-    if (box?.reading_order != null) {
-      setReadingOrder(box.reading_order);
-    }
-  }, [box?.reading_order]);
 
   if (!box || !schema) {
     return <div style={{ padding: '12px', color: '#888', fontSize: '13px' }}>Unknown tag: {box?.tag_category}</div>;
@@ -295,20 +295,23 @@ export default function TagForm({ box, onUpdate, transliterate }) {
   async function handleSave() {
     setSaving(true);
     try {
-      // Derive content_text from the content/source_text field
       const contentField = schema.fields.find((f) => ['content', 'source_text'].includes(f.name));
       const content = contentField ? (formData[contentField.name] || '') : '';
-
-      const updated = await updateBox(box.id, {
+      const payload = {
         tag_category: box.tag_category,
-        tag_data: JSON.stringify(formData),
+        tag_attributes: JSON.stringify(formData),
         content_text: content,
         reading_order: readingOrder !== '' ? Number(readingOrder) : (box.reading_order ?? null),
         confidence,
-      });
-      onUpdate(updated);
-      setSavedMsg(true);
-      setTimeout(() => setSavedMsg(false), 1500);
+      };
+      if (isPending) {
+        await onCreate(payload);
+      } else {
+        const updated = await updateBox(pageName, box.id, payload);
+        onUpdate(updated);
+        setSavedMsg(true);
+        setTimeout(() => setSavedMsg(false), 1500);
+      }
     } catch (e) {
       console.error('Save failed', e);
       alert('Failed to save. Check the backend.');
@@ -375,9 +378,17 @@ export default function TagForm({ box, onUpdate, transliterate }) {
       )}
 
       <button style={S.saveBtn} onClick={handleSave} disabled={saving}>
-        {saving ? 'Saving…' : 'Save'}
+        {saving ? 'Saving…' : isPending ? 'Save Box' : 'Save'}
       </button>
-      {savedMsg && <div style={S.saved}>Saved ✓</div>}
+      {isPending && (
+        <button
+          style={{ width: '100%', padding: '6px', marginTop: '4px', background: 'none', border: '1px solid #ccc', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', color: '#888' }}
+          onClick={onDiscard}
+        >
+          Discard
+        </button>
+      )}
+      {savedMsg && <div style={S.saved}>Saved</div>}
     </div>
   );
 }

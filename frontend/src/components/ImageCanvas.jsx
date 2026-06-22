@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react';
-import { Stage, Layer, Image as KonvaImage, Rect, Line, Circle, Transformer } from 'react-konva';
+import { Stage, Layer, Image as KonvaImage, Rect, Line, Circle, Transformer, Text as KonvaText, Group } from 'react-konva';
 import useImage from 'use-image';
-import { getTagColour } from '../tags/tagSchemas.js';
+import { getTagColour, TAG_SCHEMAS } from '../tags/tagSchemas.js';
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
@@ -412,6 +412,45 @@ const ImageCanvas = forwardRef(function ImageCanvas({
                 />
               );
             })}
+
+            {/* Floating label for selected box */}
+            {(() => {
+              const sel = boxes.find((b) => b.id === selectedBoxId);
+              if (!sel || !sel.tag_category) return null;
+              const colour = getTagColour(sel.tag_category);
+              const label = TAG_SCHEMAS[sel.tag_category]?.label || sel.tag_category;
+              const orderStr = sel.reading_order != null ? ` #${sel.reading_order}` : '';
+              const text = `${label}${orderStr}`;
+              const fontSize = 11;
+              const pad = 4;
+              const textW = text.length * 6.5;
+              const boxW = textW + pad * 2;
+              const boxH = fontSize + pad * 2;
+
+              let lx, ly;
+              if (sel.polygon_points) {
+                try {
+                  const pts = JSON.parse(sel.polygon_points);
+                  lx = Math.min(...pts.map(([xf]) => offsetX + xf * displayW));
+                  ly = Math.min(...pts.map(([, yf]) => offsetY + yf * displayH));
+                } catch { return null; }
+              } else {
+                const { x, y } = pctToStage(sel.x, sel.y, sel.width, sel.height);
+                lx = x; ly = y;
+              }
+              const lxClamped = Math.max(offsetX, lx);
+              const lyClamped = Math.max(0, ly - boxH - 2);
+
+              return (
+                <Group key="sel-label" listening={false} x={lxClamped} y={lyClamped}>
+                  <Rect width={boxW} height={boxH} fill={colour} cornerRadius={3} opacity={0.88} />
+                  <KonvaText
+                    text={text} fontSize={fontSize} fill="#fff" fontStyle="bold"
+                    x={pad} y={pad} listening={false}
+                  />
+                </Group>
+              );
+            })()}
 
             {/* In-progress rect */}
             {drawBox && drawBox.w > 2 && drawBox.h > 2 && (

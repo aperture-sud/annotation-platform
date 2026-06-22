@@ -1,7 +1,7 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import Cropper from 'react-easy-crop';
-import { uploadFiles } from '../api/client.js';
+import { uploadFiles, detectCorners } from '../api/client.js';
+import { useAuth } from '../context/AuthContext.jsx';
 
 // ── Perspective warp math ─────────────────────────────────────────────────────
 
@@ -107,40 +107,6 @@ async function perspectiveWarp(imageSrc, src4pts) {
   );
 }
 
-// ── Crop + brightness/contrast helpers ────────────────────────────────────────
-
-async function getCroppedBlob(imageSrc, pixelCrop, rotation, brightness, contrast) {
-  const image = await createImageEl(imageSrc);
-  const { naturalWidth: iw, naturalHeight: ih } = image;
-  const maxDim = Math.max(iw, ih);
-  const safeArea = Math.ceil(2 * ((maxDim / 2) * Math.sqrt(2)));
-
-  const c1 = document.createElement('canvas');
-  c1.width = safeArea; c1.height = safeArea;
-  const ctx1 = c1.getContext('2d');
-  ctx1.translate(safeArea/2, safeArea/2);
-  ctx1.rotate((rotation * Math.PI) / 180);
-  ctx1.translate(-iw/2, -ih/2);
-  const bv = ((brightness + 100) / 100).toFixed(3);
-  const cv = ((contrast  + 100) / 100).toFixed(3);
-  ctx1.filter = `brightness(${bv}) contrast(${cv})`;
-  ctx1.drawImage(image, 0, 0);
-
-  const imgData = ctx1.getImageData(0, 0, safeArea, safeArea);
-  const crop = pixelCrop || { x: 0, y: 0, width: iw, height: ih };
-  const c2 = document.createElement('canvas');
-  c2.width = Math.max(1, crop.width);
-  c2.height = Math.max(1, crop.height);
-  const ctx2 = c2.getContext('2d');
-  const offsetX = (safeArea - iw) / 2;
-  const offsetY = (safeArea - ih) / 2;
-  ctx2.putImageData(imgData, -(offsetX + crop.x), -(offsetY + crop.y));
-
-  return new Promise((res, rej) =>
-    c2.toBlob(b => b ? res(b) : rej(new Error('Empty canvas')), 'image/jpeg', 0.88)
-  );
-}
-
 // ── Polygon → min-bounding-rect helpers ──────────────────────────────────────
 
 function convexHullPts(pts) {
@@ -202,14 +168,152 @@ function polyTo4Corners(pts) {
   return best;
 }
 
+// ── Value knob (brightness / contrast) ───────────────────────────────────────
+
+function ValueKnob({ value, onChange, min, max, label, color = '#FF9800' }) {
+  const svgRef  = useRef(null);
+  const dragRef = useRef(null);
+  const SIZE = 88, CX = 44, CY = 44, R = 34;
+
+  const t      = Math.max(0, Math.min(1, (value - min) / (max - min)));
+  const sweepDeg = t * 270 - 135;          // -135…135, measured from top
+  const rad      = (sweepDeg - 90) * Math.PI / 180;
+
+  // Arc track endpoints (270° arc, -135° and +135° from top in SVG coords)
+  const arcStartRad = (-135 - 90) * Math.PI / 180;
+  const arcEndRad   = ( 135 - 90) * Math.PI / 180;
+  const Rtr = R - 6;
+  const sx = CX + Rtr * Math.cos(arcStartRad);
+  const sy = CY + Rtr * Math.sin(arcStartRad);
+  const ex = CX + Rtr * Math.cos(arcEndRad);
+  const ey = CY + Rtr * Math.sin(arcEndRad);
+  const arcD = `M ${sx} ${sy} A ${Rtr} ${Rtr} 0 1 1 ${ex} ${ey}`;
+
+  function ptrAngle(e) {
+    const rect = svgRef.current.getBoundingClientRect();
+    return Math.atan2(e.clientY - rect.top - CY, e.clientX - rect.left - CX) * 180 / Math.PI + 90;
+  }
+  function onPointerDown(e) {
+    e.preventDefault();
+    svgRef.current.setPointerCapture(e.pointerId);
+    dragRef.current = { startAngle: ptrAngle(e), startValue: value };
+  }
+  function onPointerMove(e) {
+    if (!dragRef.current) return;
+    let delta = ptrAngle(e) - dragRef.current.startAngle;
+    if (delta >  180) delta -= 360;
+    if (delta < -180) delta += 360;
+    onChange(Math.max(min, Math.min(max, dragRef.current.startValue + delta / 270 * (max - min))));
+  }
+  function onPointerUp() { dragRef.current = null; }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '2px' }}>
+      <svg ref={svgRef} width={SIZE} height={SIZE} viewBox={`0 0 ${SIZE} ${SIZE}`}
+        style={{ cursor: 'grab', touchAction: 'none', userSelect: 'none' }}
+        onPointerDown={onPointerDown} onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp} onPointerCancel={onPointerUp}
+      >
+        <circle cx={CX} cy={CY} r={R} fill="#2a2a3a" stroke="#555" strokeWidth="1.5" />
+        <path d={arcD} fill="none" stroke="#444" strokeWidth="4" strokeLinecap="round" />
+        <circle cx={sx} cy={sy} r={2.5} fill="#555" />
+        <circle cx={ex} cy={ey} r={2.5} fill="#555" />
+        {/* Center (default = 1.0) tick at top */}
+        <circle cx={CX} cy={CY - Rtr} r={2} fill="#777" />
+        <line x1={CX} y1={CY} x2={CX + (R-6) * Math.cos(rad)} y2={CY + (R-6) * Math.sin(rad)}
+          stroke={color} strokeWidth="3" strokeLinecap="round" />
+        <circle cx={CX} cy={CY} r={4} fill={color} />
+      </svg>
+      <div style={{ fontSize: '11px', color: '#aaa', textAlign: 'center', lineHeight: 1.3 }}>
+        <div style={{ fontSize: '10px', color: '#666', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</div>
+        <div style={{ fontVariantNumeric: 'tabular-nums' }}>{value.toFixed(2)}</div>
+      </div>
+    </div>
+  );
+}
+
+// ── Rotation knob ─────────────────────────────────────────────────────────────
+
+function RotationKnob({ value, onChange }) {
+  const svgRef   = useRef(null);
+  const dragRef  = useRef(null);
+  const SIZE = 112, CX = 56, CY = 56, R = 46;
+  const rad  = ((value - 90) * Math.PI) / 180;
+
+  function ptrAngle(e) {
+    const rect = svgRef.current.getBoundingClientRect();
+    return Math.atan2(e.clientY - rect.top - CY, e.clientX - rect.left - CX) * 180 / Math.PI;
+  }
+  function onPointerDown(e) {
+    e.preventDefault();
+    svgRef.current.setPointerCapture(e.pointerId);
+    dragRef.current = { startAngle: ptrAngle(e), startValue: value };
+  }
+  function onPointerMove(e) {
+    if (!dragRef.current) return;
+    let delta = ptrAngle(e) - dragRef.current.startAngle;
+    if (delta >  180) delta -= 360;
+    if (delta < -180) delta += 360;
+    onChange(dragRef.current.startValue + delta);
+  }
+  function onPointerUp() { dragRef.current = null; }
+
+  let display = value % 360;
+  if (display >  180) display -= 360;
+  if (display < -180) display += 360;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
+      <svg ref={svgRef} width={SIZE} height={SIZE} viewBox={`0 0 ${SIZE} ${SIZE}`}
+        style={{ cursor: 'grab', touchAction: 'none', userSelect: 'none' }}
+        onPointerDown={onPointerDown} onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp} onPointerCancel={onPointerUp}
+      >
+        <circle cx={CX} cy={CY} r={R} fill="#2a2a3a" stroke="#555" strokeWidth="1.5" />
+        {[0,45,90,135,180,225,270,315].map(a => {
+          const ar = (a - 90) * Math.PI / 180;
+          const major = a % 90 === 0;
+          const r1 = major ? R - 10 : R - 6;
+          return <line key={a}
+            x1={CX + r1 * Math.cos(ar)} y1={CY + r1 * Math.sin(ar)}
+            x2={CX + R  * Math.cos(ar)} y2={CY + R  * Math.sin(ar)}
+            stroke={major ? '#888' : '#555'} strokeWidth={major ? 2 : 1}
+          />;
+        })}
+        {/* indicator */}
+        <line x1={CX} y1={CY} x2={CX + (R-5)*Math.cos(rad)} y2={CY + (R-5)*Math.sin(rad)}
+          stroke="#2196F3" strokeWidth="3" strokeLinecap="round" />
+        <circle cx={CX} cy={CY} r={5} fill="#2196F3" />
+        {/* 0° mark */}
+        <circle cx={CX} cy={CY - R + 5} r={2.5} fill="#888" />
+      </svg>
+      <div style={{ color: '#aaa', fontSize: '12px', fontVariantNumeric: 'tabular-nums', minWidth: '48px', textAlign: 'center' }}>
+        {display.toFixed(1)}°
+      </div>
+    </div>
+  );
+}
+
+// ── Classification config ─────────────────────────────────────────────────────
+
+const MEDIUMS  = [{ val: 'english_medium', label: 'English Medium' }, { val: 'kannada_medium', label: 'Kannada Medium' }];
+const CLASSES  = [{ val: 'class_8', label: 'Class 8' }, { val: 'class_9', label: 'Class 9' }, { val: 'class_10', label: 'Class 10' }];
+const SUBJECTS = [
+  { val: 'english',       label: 'English' },
+  { val: 'kannada',       label: 'Kannada' },
+  { val: 'science',       label: 'Science' },
+  { val: 'social_science',label: 'Social Science' },
+  { val: 'maths',         label: 'Maths' },
+];
+
 // ── Styles ────────────────────────────────────────────────────────────────────
 
 const S = {
-  page: { display: 'flex', flexDirection: 'column', height: '100vh', backgroundColor: '#111', color: '#fff' },
-  topbar: { display: 'flex', alignItems: 'center', padding: '10px 16px', backgroundColor: '#1e1e2e', gap: '12px', flexShrink: 0 },
-  topbarTitle: { flex: 1, fontWeight: '600', fontSize: '14px' },
+  page: { display: 'flex', flexDirection: 'column', height: '100vh', backgroundColor: '#f5f6f8', color: '#1a1a1a' },
+  topbar: { display: 'flex', alignItems: 'center', padding: '10px 16px', backgroundColor: '#fff', borderBottom: '1px solid #e4e4e4', gap: '12px', flexShrink: 0 },
+  topbarTitle: { flex: 1, fontWeight: '600', fontSize: '14px', color: '#1a1a1a' },
   counter: { fontSize: '13px', color: '#aaa' },
-  backBtn: { padding: '6px 14px', border: '1px solid #555', borderRadius: '4px', backgroundColor: 'transparent', color: '#fff', cursor: 'pointer', fontSize: '13px' },
+  backBtn: { padding: '6px 14px', border: '1px solid #ddd', borderRadius: '4px', backgroundColor: 'transparent', color: '#555', cursor: 'pointer', fontSize: '13px' },
 
   captureArea: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '20px', padding: '32px' },
   bigBtn: { padding: '18px 36px', fontSize: '18px', borderRadius: '10px', border: 'none', cursor: 'pointer', fontWeight: '700', minWidth: '220px' },
@@ -241,36 +345,65 @@ const S = {
   perspSvg: { position: 'absolute', inset: 0, width: '100%', height: '100%', overflow: 'visible', touchAction: 'none' },
   perspControls: { backgroundColor: '#1a1a2a', padding: '10px 16px', flexShrink: 0, display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' },
   perspInfo: { flex: 1, fontSize: '12px', color: '#aaa' },
+  setupArea: { flex: 1, display: 'flex', flexDirection: 'column', padding: '28px 20px', gap: '24px', overflowY: 'auto' },
+  setupLabel: { fontSize: '12px', color: '#888', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '2px' },
+  chipRow: { display: 'flex', flexWrap: 'wrap', gap: '10px' },
+  chip: { padding: '11px 18px', borderRadius: '8px', border: '1px solid #e0e0e0', backgroundColor: '#fff', color: '#444', cursor: 'pointer', fontSize: '14px', fontWeight: 500 },
+  chipActive: { border: '1px solid #2196F3', backgroundColor: '#e3f2fd', color: '#0d47a1' },
+  proceedBtn: { padding: '16px', fontSize: '16px', fontWeight: 700, border: 'none', borderRadius: '10px', cursor: 'pointer', marginTop: '8px' },
 };
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function ScannerPage() {
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const homeRoute = user?.role === 'pictaker' ? '/pictaker' : '/';
 
-  // 'capture' | 'edit' | 'perspective'
-  const [mode, setMode] = useState('capture');
+  // 'setup' | 'capture' | 'edit' | 'perspective' | 'polygon' | 'detecting' | 'warp_preview'
+  const [mode, setMode] = useState('setup');
+
+  // Classification
+  const [medium,  setMedium]  = useState('');
+  const [cls,     setCls]     = useState('');
+  const [subject, setSubject] = useState('');
   const [imageSrc, setImageSrc] = useState(null);
 
   // Committed pages: [{blob, thumbUrl, name}]
   const [pages, setPages] = useState([]);
   const [editingIdx, setEditingIdx] = useState(null);
 
-  // Crop / rotate / filter state
-  const [crop, setCrop] = useState({ x: 0, y: 0 });
-  const [zoom, setZoom] = useState(1);
+  // Rotation / brightness / contrast
   const [rotation, setRotation] = useState(0);
-  const [croppedAreaPixels, setCroppedAreaPixels] = useState(null);
-  const [aspectRatio, setAspectRatio] = useState(null);
-  const [brightness, setBrightness] = useState(0);
-  const [contrast, setContrast] = useState(20);
+  const [rotHistory, setRotHistory] = useState([]);
+  const [brightness, setBrightness] = useState(1.0);
+  const [contrast,   setContrast]   = useState(1.0);
+
+  // Original image before any warp (so "Change Warp" can restart from it)
+  const [preWarpSrc, setPreWarpSrc] = useState(null);
+
+  function changeRotation(val) {
+    setRotHistory(h => [...h.slice(-19), rotation]);
+    setRotation(typeof val === 'function' ? val(rotation) : val);
+  }
+  function undoRotation() {
+    setRotHistory(h => {
+      if (!h.length) return h;
+      setRotation(h[h.length - 1]);
+      return h.slice(0, -1);
+    });
+  }
 
   // Perspective mode state
   const [perspCorners, setPerspCorners] = useState([[0.05,0.05],[0.95,0.05],[0.95,0.95],[0.05,0.95]]);
+  const [perspHistory, setPerspHistory] = useState([]);  // stack of previous corner states
   const perspDraggingRef = useRef(null);
   const perspImgAreaRef = useRef(null);
   const perspImgRef = useRef(null);
   const [perspProcessing, setPerspProcessing] = useState(false);
+  const [perspImgReady, setPerspImgReady] = useState(false);
+  const [origSrc, setOrigSrc] = useState(null);      // pre-warp image for re-adjust
+  const [warpedSrc, setWarpedSrc] = useState(null);  // warp result shown as suggestion
 
   // Polygon crop mode state
   const [polyPts, setPolyPts] = useState([]); // [[fx,fy],…] in display-fraction space
@@ -282,20 +415,28 @@ export default function ScannerPage() {
   const cameraRef = useRef(null);
   const galleryRef = useRef(null);
 
-  const onCropComplete = useCallback((_, pixels) => setCroppedAreaPixels(pixels), []);
+  useEffect(() => { setPerspImgReady(false); }, [imageSrc]);
 
-  function resetEditState(file) {
+  async function loadImageWithDetection(file) {
     if (!file) return;
-    setImageSrc(URL.createObjectURL(file));
-    setCrop({ x: 0, y: 0 });
-    setZoom(1);
+    const url = URL.createObjectURL(file);
+    setImageSrc(url);
+    setPreWarpSrc(url);
+    setOrigSrc(null);
+    setWarpedSrc(null);
     setRotation(0);
-    setCroppedAreaPixels(null);
-    setBrightness(0);
-    setContrast(20);
-    setPerspCorners([[0.05,0.05],[0.95,0.05],[0.95,0.95],[0.05,0.95]]);
+    setBrightness(1.0);
+    setContrast(1.0);
     setPolyPts([]);
-    setMode('edit');
+    setEditingIdx(null);
+    setMode('detecting');
+    try {
+      const corners = await detectCorners(file);
+      setPerspCorners(corners);
+    } catch {
+      setPerspCorners([[0.05,0.05],[0.95,0.05],[0.95,0.95],[0.05,0.95]]);
+    }
+    setMode('perspective');
   }
 
   // Polygon crop helpers
@@ -365,14 +506,29 @@ export default function ScannerPage() {
     }
   }
 
-  function handleCameraChange(e) { resetEditState(e.target.files[0]); e.target.value = ''; }
-  function handleGalleryChange(e) { resetEditState(e.target.files[0]); e.target.value = ''; }
-
-  function setDocMode() { setBrightness(20); setContrast(60); }
+  function handleCameraChange(e) { const f = e.target.files[0]; e.target.value = ''; loadImageWithDetection(f); }
+  function handleGalleryChange(e) { const f = e.target.files[0]; e.target.value = ''; loadImageWithDetection(f); }
 
   async function processCurrentPage() {
     if (!imageSrc) return null;
-    const blob = await getCroppedBlob(imageSrc, croppedAreaPixels, rotation, brightness, contrast);
+    const image = await createImageEl(imageSrc);
+    const iw = image.naturalWidth, ih = image.naturalHeight;
+    const rad = (rotation * Math.PI) / 180;
+    const cosA = Math.abs(Math.cos(rad)), sinA = Math.abs(Math.sin(rad));
+    const outW = Math.round(iw * cosA + ih * sinA);
+    const outH = Math.round(iw * sinA + ih * cosA);
+    const canvas = document.createElement('canvas');
+    canvas.width = outW; canvas.height = outH;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, outW, outH);
+    ctx.translate(outW / 2, outH / 2);
+    ctx.rotate(rad);
+    ctx.filter = `brightness(${brightness}) contrast(${contrast})`;
+    ctx.drawImage(image, -iw / 2, -ih / 2);
+    const blob = await new Promise((res, rej) =>
+      canvas.toBlob(b => b ? res(b) : rej(new Error('canvas empty')), 'image/jpeg', 0.88)
+    );
     const thumbUrl = URL.createObjectURL(blob);
     return { blob, thumbUrl, name: `Page ${pages.length + 1}` };
   }
@@ -401,8 +557,8 @@ export default function ScannerPage() {
       const files = allPages.map((p, i) =>
         new File([p.blob], `${p.name || `page_${i+1}`}.jpg`, { type: 'image/jpeg' })
       );
-      await uploadFiles(files);
-      navigate('/');
+      await uploadFiles(files, { medium, cls, subject });
+      navigate('/pictaker');
     } catch (e) {
       console.error('Upload failed', e);
       alert('Upload failed. Is the backend running?');
@@ -417,9 +573,13 @@ export default function ScannerPage() {
     const pg = pages[idx];
     if (!pg) return;
     setImageSrc(pg.thumbUrl);
-    setCrop({ x: 0, y: 0 }); setZoom(1); setRotation(0);
-    setCroppedAreaPixels(null); setBrightness(0); setContrast(20);
+    setPreWarpSrc(pg.thumbUrl);
+    setRotation(0);
+    setRotHistory([]);
+    setBrightness(1.0);
+    setContrast(1.0);
     setPerspCorners([[0.05,0.05],[0.95,0.05],[0.95,0.95],[0.05,0.95]]);
+    setPerspHistory([]);
     setPolyPts([]);
     setEditingIdx(idx);
     setMode('edit');
@@ -466,8 +626,17 @@ export default function ScannerPage() {
 
   function perspPointerDown(e, idx) {
     e.preventDefault();
+    setPerspHistory(h => [...h.slice(-19), perspCorners]); // save before drag
     perspDraggingRef.current = idx;
     e.currentTarget.closest('svg').setPointerCapture(e.pointerId);
+  }
+
+  function undoPerspCorners() {
+    setPerspHistory(h => {
+      if (!h.length) return h;
+      setPerspCorners(h[h.length - 1]);
+      return h.slice(0, -1);
+    });
   }
 
   function perspPointerMove(e) {
@@ -486,14 +655,15 @@ export default function ScannerPage() {
     if (!imageSrc) return;
     setPerspProcessing(true);
     try {
-      const img = perspImgRef.current || await createImageEl(imageSrc);
+      const ref = perspImgRef.current;
+      const img = (ref && ref.naturalWidth > 0) ? ref : await createImageEl(imageSrc);
       const iw = img.naturalWidth, ih = img.naturalHeight;
       const src4 = perspCorners.map(([fx, fy]) => [fx*iw, fy*ih]);
       const blob = await perspectiveWarp(imageSrc, src4);
       const newUrl = URL.createObjectURL(blob);
-      setImageSrc(newUrl);
-      setPerspCorners([[0.05,0.05],[0.95,0.05],[0.95,0.95],[0.05,0.95]]);
-      setMode('edit');
+      setOrigSrc(imageSrc);
+      setWarpedSrc(newUrl);
+      setMode('warp_preview');
     } catch (e) {
       console.error('Perspective warp failed', e);
       alert('Warp failed: ' + e.message);
@@ -502,9 +672,28 @@ export default function ScannerPage() {
     }
   }
 
+  async function acceptWarp() {
+    setImageSrc(warpedSrc);
+    setOrigSrc(null);
+    setWarpedSrc(null);
+    setPerspCorners([[0.05,0.05],[0.95,0.05],[0.95,0.95],[0.05,0.95]]);
+    setPerspHistory([]);
+    setRotation(0);
+    setRotHistory([]);
+    setBrightness(1.0);
+    setContrast(1.0);
+    setMode('edit');
+  }
+
+  function readjustWarp() {
+    setImageSrc(origSrc);
+    // Keep warpedSrc/origSrc so perspective mode can offer "Back to preview"
+    // and so re-applying warp still has access to the original
+    setMode('perspective');
+  }
+
   // ── Render ────────────────────────────────────────────────────────────────
 
-  const filterStyle = `brightness(${((brightness+100)/100).toFixed(2)}) contrast(${((contrast+100)/100).toFixed(2)})`;
   const totalPages = pages.length + (mode === 'edit' && editingIdx === null ? 1 : 0);
   const currentPageNum = editingIdx !== null ? editingIdx + 1 : pages.length + 1;
 
@@ -512,14 +701,98 @@ export default function ScannerPage() {
     <div style={S.page}>
       {/* Top bar */}
       <div style={S.topbar}>
-        <button style={S.backBtn} onClick={() => navigate('/')}>← Home</button>
-        <span style={S.topbarTitle}>Scanner</span>
+        <button style={S.backBtn} onClick={() => navigate(homeRoute)}>← Home</button>
+        <span style={S.topbarTitle}>
+          {mode === 'setup' ? 'Select subject' : [medium, cls, subject].filter(Boolean).map((v) => v.replace(/_/g, ' ')).join(' · ')}
+        </span>
+        {mode !== 'setup' && (
+          <button style={{ ...S.backBtn, fontSize: '11px' }} onClick={() => setMode('setup')}>Change</button>
+        )}
         {(mode === 'edit' || mode === 'perspective') && (
           <span style={S.counter}>
             Page {currentPageNum}{totalPages > 1 ? ` of ${totalPages}` : ''}
           </span>
         )}
       </div>
+
+      {/* ── SETUP MODE ── */}
+      {mode === 'setup' && (
+        <div style={S.setupArea}>
+          <div>
+            <div style={S.setupLabel}>Medium</div>
+            <div style={S.chipRow}>
+              {MEDIUMS.map(({ val, label }) => (
+                <button key={val} style={{ ...S.chip, ...(medium === val ? S.chipActive : {}) }}
+                  onClick={() => setMedium(medium === val ? '' : val)}>{label}</button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <div style={S.setupLabel}>Class</div>
+            <div style={S.chipRow}>
+              {CLASSES.map(({ val, label }) => (
+                <button key={val} style={{ ...S.chip, ...(cls === val ? S.chipActive : {}) }}
+                  onClick={() => setCls(cls === val ? '' : val)}>{label}</button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <div style={S.setupLabel}>Subject</div>
+            <div style={S.chipRow}>
+              {SUBJECTS.map(({ val, label }) => (
+                <button key={val} style={{ ...S.chip, ...(subject === val ? S.chipActive : {}) }}
+                  onClick={() => setSubject(subject === val ? '' : val)}>{label}</button>
+              ))}
+            </div>
+          </div>
+          <button
+            style={{
+              ...S.proceedBtn,
+              backgroundColor: medium && cls && subject ? '#2196F3' : '#efefef',
+              color: medium && cls && subject ? '#fff' : '#aaa',
+              border: medium && cls && subject ? '1px solid #1976D2' : '1px solid #e0e0e0',
+              boxShadow: medium && cls && subject ? '0 4px 14px rgba(33,150,243,0.35)' : '0 1px 3px rgba(0,0,0,0.08)',
+              transform: medium && cls && subject ? 'translateY(-1px)' : 'none',
+            }}
+            disabled={!medium || !cls || !subject}
+            onClick={() => setMode('capture')}
+          >
+            {medium && cls && subject ? 'Continue →' : 'Select medium, class and subject'}
+          </button>
+        </div>
+      )}
+
+      {/* ── DETECTING MODE ── */}
+      {mode === 'detecting' && (
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '16px', position: 'relative' }}>
+          {imageSrc && <img src={imageSrc} alt="" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', opacity: 0.4 }} />}
+          <div style={{ position: 'relative', fontSize: '15px', fontWeight: 600, color: '#333' }}>Detecting document boundary…</div>
+        </div>
+      )}
+
+      {/* ── WARP PREVIEW MODE ── */}
+      {mode === 'warp_preview' && warpedSrc && (
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          <div style={{ flex: 1, position: 'relative', backgroundColor: '#000', overflow: 'hidden' }}>
+            <img
+              src={warpedSrc}
+              alt="warp preview"
+              style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain' }}
+            />
+          </div>
+          <div style={{ backgroundColor: '#1a1a2a', padding: '10px 16px', display: 'flex', gap: '10px', alignItems: 'center', flexShrink: 0 }}>
+            <span style={{ flex: 1, fontSize: '12px', color: '#aaa' }}>
+              Warp applied. Accept or go back to adjust the corners.
+            </span>
+            <button style={{ ...S.smallBtn, backgroundColor: '#555' }} onClick={readjustWarp}>
+              Warp manually
+            </button>
+            <button style={{ ...S.smallBtn, backgroundColor: '#4CAF50', borderColor: '#4CAF50' }} onClick={acceptWarp}>
+              Accept →
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* ── CAPTURE MODE ── */}
       {mode === 'capture' && (
@@ -546,8 +819,8 @@ export default function ScannerPage() {
                   const files = pages.map((p, i) =>
                     new File([p.blob], `${p.name || `page_${i+1}`}.jpg`, { type: 'image/jpeg' })
                   );
-                  await uploadFiles(files);
-                  navigate('/');
+                  await uploadFiles(files, { medium, cls, subject });
+                  navigate('/pictaker');
                 } catch (e) {
                   alert('Upload failed. Is the backend running?');
                 } finally {
@@ -561,7 +834,7 @@ export default function ScannerPage() {
           )}
 
           <input ref={cameraRef} type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={handleCameraChange} />
-          <input ref={galleryRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={handleGalleryChange} />
+          <input ref={galleryRef} type="file" accept="image/*" multiple style={{ display: 'none' }} onChange={handleGalleryChange} />
 
           {/* Thumbnail strip in capture mode */}
           {pages.length > 0 && (
@@ -595,57 +868,80 @@ export default function ScannerPage() {
       {mode === 'perspective' && imageSrc && (
         <div style={S.perspRoot}>
           <div ref={perspImgAreaRef} style={S.perspImgArea}>
-            <img ref={perspImgRef} src={imageSrc} style={S.perspImg} alt="perspective" draggable={false} />
-            <svg
-              style={S.perspSvg}
-              onPointerMove={perspPointerMove}
-              onPointerUp={perspPointerUp}
-            >
-              {/* Filled quad */}
-              <polygon
-                points={perspCorners.map(c => cornerToSVG(c).join(',')).join(' ')}
-                fill="rgba(33,150,243,0.12)"
-                stroke="#2196F3"
-                strokeWidth="2"
-                strokeDasharray="6 4"
-              />
-              {/* Corner handles */}
-              {perspCorners.map((c, i) => {
-                const [cx, cy] = cornerToSVG(c);
-                const labels = ['TL','TR','BR','BL'];
-                return (
-                  <g key={i}>
-                    <circle
-                      cx={cx} cy={cy} r={16}
-                      fill="rgba(33,150,243,0.15)"
-                      stroke="#2196F3"
-                      strokeWidth={2}
-                      style={{ cursor: 'grab', touchAction: 'none' }}
-                      onPointerDown={(e) => perspPointerDown(e, i)}
-                    />
-                    <text x={cx} y={cy+4} textAnchor="middle" fontSize="11" fill="#fff" style={{ pointerEvents: 'none', userSelect: 'none' }}>
-                      {labels[i]}
-                    </text>
-                  </g>
-                );
-              })}
-            </svg>
+            <img
+              ref={perspImgRef}
+              src={imageSrc}
+              style={S.perspImg}
+              alt="perspective"
+              draggable={false}
+              onLoad={() => setPerspImgReady(true)}
+            />
+            {!perspImgReady && (
+              <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#aaa', fontSize: '13px' }}>
+                Loading…
+              </div>
+            )}
+            {perspImgReady && (
+              <svg
+                style={S.perspSvg}
+                onPointerMove={perspPointerMove}
+                onPointerUp={perspPointerUp}
+              >
+                {/* Filled quad */}
+                <polygon
+                  points={perspCorners.map(c => cornerToSVG(c).join(',')).join(' ')}
+                  fill="rgba(33,150,243,0.12)"
+                  stroke="#2196F3"
+                  strokeWidth="2"
+                  strokeDasharray="6 4"
+                />
+                {/* Corner handles — larger touch target on mobile */}
+                {perspCorners.map((c, i) => {
+                  const [cx, cy] = cornerToSVG(c);
+                  const labels = ['TL','TR','BR','BL'];
+                  return (
+                    <g key={i}>
+                      {/* Invisible large tap target */}
+                      <circle
+                        cx={cx} cy={cy} r={28}
+                        fill="transparent"
+                        style={{ touchAction: 'none', cursor: 'grab' }}
+                        onPointerDown={(e) => perspPointerDown(e, i)}
+                      />
+                      <circle
+                        cx={cx} cy={cy} r={14}
+                        fill="rgba(33,150,243,0.25)"
+                        stroke="#2196F3"
+                        strokeWidth={2.5}
+                        style={{ pointerEvents: 'none' }}
+                      />
+                      <text x={cx} y={cy+4} textAnchor="middle" fontSize="11" fill="#fff" style={{ pointerEvents: 'none', userSelect: 'none' }}>
+                        {labels[i]}
+                      </text>
+                    </g>
+                  );
+                })}
+              </svg>
+            )}
           </div>
 
           <div style={S.perspControls}>
             <span style={S.perspInfo}>
-              Drag corners to the paper edges. Apply warps to A4.
+              {warpedSrc ? 'Drag corners to re-warp.' : 'Drag corners to the paper edges.'}
             </span>
+            <button style={{ ...S.smallBtn, backgroundColor: '#555' }} onClick={undoPerspCorners} disabled={!perspHistory.length}>
+              ↩ Undo
+            </button>
             <button
               style={{ ...S.smallBtn, backgroundColor: '#555' }}
-              onClick={() => setMode('edit')}
+              onClick={() => warpedSrc ? setMode('warp_preview') : setMode('edit')}
             >
-              Cancel
+              {warpedSrc ? '← Preview' : 'Cancel'}
             </button>
             <button
               style={{ ...S.smallBtn, backgroundColor: '#2196F3', borderColor: '#2196F3' }}
               onClick={applyPerspectiveWarp}
-              disabled={perspProcessing}
+              disabled={perspProcessing || !perspImgReady}
             >
               {perspProcessing ? 'Warping…' : 'Apply Warp →'}
             </button>
@@ -713,129 +1009,51 @@ export default function ScannerPage() {
       {/* ── EDIT MODE ── */}
       {mode === 'edit' && imageSrc && (
         <div style={S.editRoot}>
-          {/* Crop area — CSS filter applied to the media for live preview */}
-          <div style={S.cropWrapper}>
-            <Cropper
-              image={imageSrc}
-              crop={crop}
-              zoom={zoom}
-              rotation={rotation}
-              aspect={aspectRatio}
-              onCropChange={setCrop}
-              onZoomChange={setZoom}
-              onCropComplete={onCropComplete}
+          {/* Image preview */}
+          <div style={{ flex: 1, minHeight: 0, backgroundColor: '#000', overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <img
+              src={imageSrc}
+              alt="preview"
               style={{
-                containerStyle: { background: '#000' },
-                mediaStyle: { filter: filterStyle },
+                maxWidth: '100%', maxHeight: '100%', objectFit: 'contain',
+                transform: `rotate(${rotation}deg)`, transformOrigin: 'center',
+                filter: `brightness(${brightness}) contrast(${contrast})`,
+                userSelect: 'none', display: 'block',
               }}
             />
           </div>
 
-          {/* Controls */}
-          <div style={S.controls}>
-            {/* Aspect ratio */}
-            <div style={S.controlRow}>
-              <span style={S.controlLabel}>Aspect</span>
-              {[
-                { label: 'Free', val: null },
-                { label: 'A4', val: 210/297 },
-                { label: 'Square', val: 1 },
-                { label: 'A4 Land.', val: 297/210 },
-              ].map(({ label, val }) => (
-                <button
-                  key={label}
-                  style={{ ...S.smallBtn, ...(aspectRatio === val ? S.smallBtnActive : {}) }}
-                  onClick={() => setAspectRatio(val)}
-                >
-                  {label}
-                </button>
-              ))}
+          {/* Knobs row: brightness | rotation | contrast */}
+          <div style={{ backgroundColor: '#1a1a2a', padding: '10px 16px', flexShrink: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '16px' }}>
+              <ValueKnob value={brightness} onChange={setBrightness} min={0.5} max={2.0} label="Brightness" color="#FFC107" />
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                  <button style={S.smallBtn} onClick={() => changeRotation(r => r - 90)}>↺ 90°</button>
+                  <RotationKnob value={rotation} onChange={changeRotation} />
+                  <button style={S.smallBtn} onClick={() => changeRotation(r => r + 90)}>↻ 90°</button>
+                </div>
+              </div>
+              <ValueKnob value={contrast} onChange={setContrast} min={0.5} max={2.5} label="Contrast" color="#29B6F6" />
             </div>
-
-            {/* Perspective / Polygon crop */}
-            <div style={S.controlRow}>
-              <span style={S.controlLabel}>Crop</span>
-              <button
-                style={S.smallBtn}
-                onClick={() => setMode('perspective')}
-                title="Drag 4 corners to straighten a trapezoid paper to A4"
-              >
-                ⬡ Trapezoid Fix
-              </button>
-              <button
-                style={{ ...S.smallBtn, borderColor: '#E91E63', color: '#E91E63' }}
-                onClick={() => { setPolyPts([]); setMode('polygon'); }}
-                title="Draw a polygon around the document to crop it"
-              >
-                ⬠ Polygon Crop
-              </button>
-            </div>
-
-            {/* Rotate */}
-            <div style={S.controlRow}>
-              <span style={S.controlLabel}>Rotate</span>
-              <button style={S.smallBtn} onClick={() => setRotation((r) => r - 90)}>↺ 90°</button>
-              <button style={S.smallBtn} onClick={() => setRotation((r) => r + 90)}>↻ 90°</button>
-              <input
-                type="range" min={-45} max={45} step={0.5}
-                value={rotation % 360 > 180 ? rotation-360 : (rotation % 360 < -180 ? rotation+360 : rotation % 360)}
-                onChange={(e) => {
-                  const base = Math.round(rotation/90)*90;
-                  setRotation(base + Number(e.target.value));
-                }}
-                style={S.slider}
-              />
-              <span style={{ fontSize: '11px', color: '#aaa', minWidth: '36px' }}>{(rotation % 360).toFixed(0)}°</span>
-            </div>
-
-            {/* Brightness */}
-            <div style={S.controlRow}>
-              <span style={S.controlLabel}>Brightness</span>
-              <input
-                type="range" min={-100} max={100} value={brightness}
-                onChange={(e) => setBrightness(Number(e.target.value))}
-                style={S.slider}
-              />
-              <span style={{ fontSize: '11px', color: '#aaa', minWidth: '36px' }}>{brightness > 0 ? `+${brightness}` : brightness}</span>
-            </div>
-
-            {/* Contrast */}
-            <div style={S.controlRow}>
-              <span style={S.controlLabel}>Contrast</span>
-              <input
-                type="range" min={-100} max={100} value={contrast}
-                onChange={(e) => setContrast(Number(e.target.value))}
-                style={S.slider}
-              />
-              <span style={{ fontSize: '11px', color: '#aaa', minWidth: '36px' }}>{contrast > 0 ? `+${contrast}` : contrast}</span>
-              <button style={S.smallBtn} onClick={setDocMode} title="Optimise for handwriting">📄 Doc</button>
-            </div>
-
-            {/* Zoom */}
-            <div style={S.controlRow}>
-              <span style={S.controlLabel}>Zoom</span>
-              <input
-                type="range" min={1} max={4} step={0.05} value={zoom}
-                onChange={(e) => setZoom(Number(e.target.value))}
-                style={S.slider}
-              />
-              <span style={{ fontSize: '11px', color: '#aaa', minWidth: '32px' }}>{zoom.toFixed(2)}×</span>
+            <div style={{ display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap' }}>
+              <button style={S.smallBtn} onClick={() => {
+                const src = preWarpSrc || imageSrc;
+                setImageSrc(src);
+                setPerspCorners([[0.05,0.05],[0.95,0.05],[0.95,0.95],[0.05,0.95]]);
+                setPerspHistory([]);
+                setMode('perspective');
+              }}>Change Warp</button>
+              <button style={S.smallBtn} onClick={undoRotation} disabled={!rotHistory.length}>↩ Undo</button>
+              <button style={{ ...S.smallBtn, marginLeft: 'auto' }} onClick={() => { setRotHistory([]); setRotation(0); setBrightness(1.0); setContrast(1.0); }}>Reset</button>
             </div>
           </div>
 
           {/* Action buttons */}
           <div style={S.actionRow}>
-            <button style={{ ...S.actionBtn, backgroundColor: '#333', color: '#fff' }} onClick={handleRetake}>
-              Retake
-            </button>
-            <button style={{ ...S.actionBtn, backgroundColor: '#555', color: '#fff' }} onClick={handleAddAnother}>
-              + Save &amp; Add Page
-            </button>
-            <button
-              style={{ ...S.actionBtn, backgroundColor: '#2196F3', color: '#fff' }}
-              onClick={handleDone}
-              disabled={uploading}
-            >
+            <button style={{ ...S.actionBtn, backgroundColor: '#333', color: '#fff' }} onClick={handleRetake}>Retake</button>
+            <button style={{ ...S.actionBtn, backgroundColor: '#555', color: '#fff' }} onClick={handleAddAnother}>+ Add Page</button>
+            <button style={{ ...S.actionBtn, backgroundColor: '#2196F3', color: '#fff' }} onClick={handleDone} disabled={uploading}>
               {uploading ? 'Uploading…' : 'Save & Done →'}
             </button>
           </div>
@@ -846,17 +1064,12 @@ export default function ScannerPage() {
               <div style={S.thumbStripInner}>
                 {pages.map((pg, idx) => (
                   <div key={idx} style={S.thumbWrap}>
-                    <img
-                      src={pg.thumbUrl}
-                      alt={pg.name}
+                    <img src={pg.thumbUrl} alt={pg.name}
                       style={{ ...S.thumb, borderColor: editingIdx === idx ? '#2196F3' : 'transparent' }}
-                      onClick={() => handleEditThumb(idx)}
-                      title="Re-edit"
+                      onClick={() => handleEditThumb(idx)} title="Re-edit"
                     />
                     <button style={S.thumbDelete} onClick={() => handleDeleteThumb(idx)} title="Remove">✕</button>
-                    <input
-                      style={S.thumbName}
-                      value={pg.name}
+                    <input style={S.thumbName} value={pg.name}
                       onChange={(e) => handleRenamePage(idx, e.target.value)}
                       onClick={(e) => e.stopPropagation()}
                     />

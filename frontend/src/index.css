@@ -52,6 +52,9 @@ body {
 .tb-btn.on-preview:hover { background: #d1c4e9; }
 .tb-btn.btn-export { background: #e3f2fd; border-color: #64b5f6; color: #0d47a1; }
 .tb-btn.btn-export:hover { background: #bbdefb; }
+.tb-btn.btn-submit { background: #e8f5e9; border-color: #81c784; color: #1b5e20; font-weight: 600; }
+.tb-btn.btn-submit:hover:not(:disabled) { background: #c8e6c9; }
+.tb-btn.btn-saved  { background: #f3e5f5; border-color: #ce93d8; color: #4a148c; }
 
 /* Panel inner action links */
 .panel-link {

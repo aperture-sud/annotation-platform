@@ -478,10 +478,29 @@ export const TAG_SCHEMAS = {
       { name: 'spine_x', type: 'number', label: 'Spine x-position (0.0–1.0 fraction of image width)', min: 0, max: 1 },
     ],
   },
+
+  page_boundary: {
+    label: 'Page Boundary',
+    colour: '#546E7A',
+    latex_cmd: '\\page_boundary',
+    fields: [],
+  },
+
+  // ── PAGE ─────────────────────────────────────────────────────────────────────
+  page_text: {
+    label: 'Page Text Region',
+    colour: '#00897B',
+    latex_cmd: '\\begin{page_text}',
+    is_environment: true,
+    fields: [
+      { name: 'notes', type: 'textarea', label: 'Notes (e.g. orientation, crop issues)' },
+    ],
+  },
 };
 
 // Groups for the TagDropdown UI
 export const TAG_GROUPS = {
+  PAGE: ['page_text'],
   TEXT: ['text', 'line', 'heading', 'paragraph'],
   CORRECTIONS: ['sout', 'scribble', 'overwrite', 'insert', 'underline', 'circle', 'illegible', 'overlap'],
   CONTINUATIONS: ['arrow_start', 'arrow_target', 'page_start', 'page_target', 'marginnote'],
@@ -491,9 +510,9 @@ export const TAG_GROUPS = {
   VISUAL: ['graph', 'map', 'diagram', 'flowchart'],
   LANGUAGE: ['prosody_kannada', 'hwscore'],
   ADMINISTRATIVE: ['teacher_mark', 'teacher_score', 'teacher_comment', 'stamp_circular', 'rough', 'metadata'],
-  WRAPPERS: ['answer', 'spread'],
+  WRAPPERS: ['answer', 'spread', 'page_boundary'],
 };
 
 export function getTagColour(tagType) {
-  return TAG_SCHEMAS[tagType]?.colour || '#aaaaaa';
+  return TAG_SCHEMAS[tagType]?.colour || '#111111';
 }

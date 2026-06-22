@@ -1,0 +1,50 @@
+[
+  {
+    "id": 1,
+    "page_name": "kn_10_sci_1",
+    "parent_id": null,
+    "coordinates": "[[0.010911035160033,0.0020384494719002944],[0.9822977933628868,0.0020384494719002944],[0.9822977933628868,0.9995843983810682],[0.010911035160033,0.9995843983810682]]",
+    "tag_category": "page_text",
+    "tag_attributes": null,
+    "content_text": "",
+    "reading_order": 1,
+    "confidence": "high",
+    "created_at": "2026-06-01 16:04:40.283447"
+  },
+  {
+    "id": 3,
+    "page_name": "kn_10_sci_1",
+    "parent_id": 2,
+    "coordinates": "[[0.06349206349206349,0.027645777127007096],[0.9382716049382716,0.027645777127007096],[0.9382716049382716,0.2349891055795602],[0.06349206349206349,0.2349891055795602]]",
+    "tag_category": "text",
+    "tag_attributes": null,
+    "content_text": "the morning light is turning blue the feeling is bizarre",
+    "reading_order": 3,
+    "confidence": "high",
+    "created_at": "2026-06-01 16:05:39.332316"
+  },
+  {
+    "id": 2,
+    "page_name": "kn_10_sci_1",
+    "parent_id": 1,
+    "coordinates": "[[0.054937223584648476,0.025919782861244745],[0.9332441018915268,0.025919782861244745],[0.9332441018915268,0.44688957093157977],[0.054937223584648476,0.44688957093157977]]",
+    "tag_category": "answer",
+    "tag_attributes": null,
+    "content_text": "",
+    "reading_order": 2,
+    "confidence": "high",
+    "created_at": "2026-06-01 16:05:06.604787"
+  },
+  {
+    "id": 4,
+    "page_name": "kn_10_sci_1",
+    "parent_id": 2,
+    "coordinates": "[[0.06172839506172839,0.24504211544392643],[0.9153439153439153,0.24504211544392643],[0.9153439153439153,0.4234830405364267],[0.06172839506172839,0.4234830405364267]]",
+    "tag_category": "math_inline",
+    "tag_attributes": null,
+    "content_text": "(a+b)^2 = a^2 + 2ab + b^2",
+    "reading_order": 4,
+    "confidence": "high",
+    "created_at": "2026-06-01 16:06:07.248882"
+  }
+]

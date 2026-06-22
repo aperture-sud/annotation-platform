@@ -1,0 +1,23 @@
+[
+  {
+    "id": 1,
+    "username": "test",
+    "password_hash": "$2b$12$OQIHVfP758nCenTkKPQoBuYXUG5.s8oDFOi3AoWhuTySutZBESW.e",
+    "role": "admin",
+    "created_at": "2026-06-01 01:24:00.134968"
+  },
+  {
+    "id": 4,
+    "username": "cam1",
+    "password_hash": "$2b$12$p0gx.yt8W8YaAjIVJMLi7uB9J/R1b1z1Egn/RqxQ66Byw42xfdqSG",
+    "role": "pictaker",
+    "created_at": "2026-06-01 01:50:19.62288"
+  },
+  {
+    "id": 5,
+    "username": "dswcf",
+    "password_hash": "$2b$12$Hg9OMUcYo2rU/Zvq2mA5Lutdta9pNhoPQ2usRQSHdQ4uZRN3S.gKy",
+    "role": "annotator",
+    "created_at": "2026-06-01 15:10:42.206185"
+  }
+]

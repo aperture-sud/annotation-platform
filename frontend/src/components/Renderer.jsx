@@ -2,7 +2,7 @@ import { useMemo, useRef, useState, useEffect, useLayoutEffect } from 'react';
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
 import 'katex/contrib/mhchem';
-import { getTagColour } from '../tags/tagSchemas.js';
+import { getTagColour, TAG_SCHEMAS } from '../tags/tagSchemas.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -156,7 +156,9 @@ const D = {
   h2:           { fontSize: '1.12em', fontWeight: 700, margin: '1.2em 0 0.3em', lineHeight: 1.2 },
   h3:           { fontSize: '1em',    fontWeight: 700, fontStyle: 'italic', margin: '1em 0 0.25em', lineHeight: 1.2 },
   answerBlock:  { margin: '1.4em 0', borderTop: '1.5px solid currentColor', paddingTop: '0.5em' },
-  answerLabel:  { fontSize: '0.77em', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: '0.35em' },
+  answerLabel:  { display: 'flex', alignItems: 'baseline', gap: '0.4em', marginBottom: '0.35em' },
+  answerWord:   { fontSize: '0.72em', fontWeight: 400, letterSpacing: '0.06em', color: '#888' },
+  answerQid:    { fontSize: '1em', fontWeight: 700 },
   sectionWrap:  { margin: '1em 0' },
   sectionLabel: { fontSize: '0.72em', fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: '0.15em' },
   sectionBody:  { borderLeft: '1.5px solid #ccc', paddingLeft: '14px' },
@@ -207,10 +209,16 @@ function Tag({ box, children }) {
 
   if (tag === 'answer') return (
     <div style={D.answerBlock}>
-      <div style={D.answerLabel}>Answer{td.question_id ? ` — Q ${td.question_id}` : ''}</div>
+      <div style={D.answerLabel}>
+        <span style={D.answerWord}>answer</span>
+        {td.question_id && <span style={D.answerQid}>{td.question_id}</span>}
+      </div>
       {children}
     </div>
   );
+
+  if (tag === 'page_text') return <div style={{ margin: '0.5em 0' }}>{children}</div>;
+  if (tag === 'page_boundary') return <hr style={{ border: 'none', borderTop: '1px dashed #ccc', margin: '1em 0' }} />;
 
   // ── Math ──────────────────────────────────────────────────────────────────
 
@@ -384,21 +392,25 @@ function Tag({ box, children }) {
     return parts.length ? <p style={{ ...D.p, fontSize: '0.82em' }}>{parts.join(' ')}</p> : null;
   }
 
-  return content ? <p style={D.p}><C text={content} /></p> : null;
+  return (
+    <>
+      {content && <p style={D.p}><C text={content} /></p>}
+      {children}
+    </>
+  );
 }
 
 // ── Tree ──────────────────────────────────────────────────────────────────────
 
-function sortByOrder(boxes) {
-  return [...boxes].sort((a, b) => {
-    if (a.reading_order == null && b.reading_order == null) return a.id - b.id;
-    if (a.reading_order == null) return 1;
-    if (b.reading_order == null) return -1;
-    return a.reading_order - b.reading_order;
+function sortByOrder(arr) {
+  return [...arr].sort((a, b) => {
+    const ra = a.reading_order ?? Infinity;
+    const rb = b.reading_order ?? Infinity;
+    return ra !== rb ? ra - rb : a.id - b.id;
   });
 }
 
-function RenderTree({ boxes, selectedBoxId }) {
+function RenderTree({ boxes, selectedBoxId, onSelect }) {
   const childMap = useMemo(() => {
     const map = {};
     for (const b of boxes) {
@@ -413,17 +425,31 @@ function RenderTree({ boxes, selectedBoxId }) {
     return sortByOrder(childMap[pid] || []).map((box) => {
       const color = getTagColour(box.tag_category);
       const isSelected = box.id === selectedBoxId;
+      const schema = TAG_SCHEMAS[box.tag_category];
       return (
         <div
           key={box.id}
           data-box-id={box.id}
+          onClick={onSelect ? (e) => { e.stopPropagation(); onSelect(box.id); } : undefined}
           style={{
             outline: isSelected ? `2px solid ${color}` : `1px solid ${color}44`,
             backgroundColor: isSelected ? `${color}12` : 'transparent',
             borderRadius: '2px',
             margin: '1px 0',
+            cursor: onSelect ? 'pointer' : undefined,
+            position: 'relative',
           }}
         >
+          {isSelected && (
+            <div style={{
+              position: 'absolute', top: 2, right: 4,
+              fontSize: '10px', fontWeight: 700, padding: '1px 6px', borderRadius: '8px',
+              backgroundColor: color + '22', color, border: `1px solid ${color}55`,
+              whiteSpace: 'nowrap', pointerEvents: 'none',
+            }}>
+              {schema?.label || box.tag_category}{box.reading_order != null ? ` #${box.reading_order}` : ''}
+            </div>
+          )}
           <Tag box={box}>{renderLevel(box.id)}</Tag>
         </div>
       );
@@ -478,11 +504,11 @@ function Connectors({ lines, height }) {
 
 // ── Main export ───────────────────────────────────────────────────────────────
 
-export default function Renderer({ boxes, selectedBoxId }) {
+export default function Renderer({ boxes, selectedBoxId, onSelect }) {
   const pageRef = useRef(null);
   const [drawData, setDrawData] = useState({ lines: [], height: 0 });
 
-  const tagged = useMemo(() => boxes.filter((b) => b.tag_category), [boxes]);
+  const tagged = useMemo(() => sortByOrder(boxes.filter((b) => b.tag_category)), [boxes]);
 
   useLayoutEffect(() => {
     const page = pageRef.current;
@@ -526,7 +552,7 @@ export default function Renderer({ boxes, selectedBoxId }) {
       >
         {tagged.length === 0
           ? <p style={{ fontStyle: 'italic', color: '#bbb', fontFamily: FONT, fontSize: '14px' }}>No annotated boxes yet.</p>
-          : <RenderTree boxes={tagged} selectedBoxId={selectedBoxId} />
+          : <RenderTree boxes={tagged} selectedBoxId={selectedBoxId} onSelect={onSelect} />
         }
         <Connectors lines={drawData.lines} height={drawData.height} />
       </div>

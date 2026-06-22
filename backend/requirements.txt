@@ -1,6 +1,10 @@
 fastapi
 uvicorn[standard]
-sqlalchemy
+psycopg2-binary
+python-dotenv
 python-multipart
 pillow
-aiofiles
+opencv-python-headless
+numpy
+python-jose[cryptography]
+passlib[bcrypt]
