@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   getDocuments, uploadFiles, renameDocument, deleteDocument, renamePage,
-  getAnnotationRequests, approveAnnotationRequest, rejectAnnotationRequest,
+  getAdminUploads, getAnnotationRequests, approveAnnotationRequest, rejectAnnotationRequest,
 } from '../api/client.js';
 import { useAuth } from '../context/AuthContext.jsx';
 
@@ -19,6 +19,7 @@ export default function HomePage() {
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef(null);
 
+  const [uploadGroups, setUploadGroups] = useState([]);
   const [requests, setRequests] = useState([]);
 
   useEffect(() => { load(); }, []);
@@ -31,10 +32,23 @@ export default function HomePage() {
       console.error('Failed to load documents', e);
     }
     if (isAdmin) {
-      try {
-        setRequests(await getAnnotationRequests());
-      } catch {}
+      try { setUploadGroups(await getAdminUploads()); } catch {}
+      try { setRequests(await getAnnotationRequests()); } catch {}
     }
+  }
+
+  async function handleApprove(id) {
+    try {
+      const updated = await approveAnnotationRequest(id);
+      setRequests((prev) => prev.map((r) => r.id === id ? updated : r));
+    } catch (e) { alert(e.response?.data?.detail || 'Failed to approve.'); }
+  }
+
+  async function handleReject(id) {
+    try {
+      const updated = await rejectAnnotationRequest(id);
+      setRequests((prev) => prev.map((r) => r.id === id ? updated : r));
+    } catch (e) { alert(e.response?.data?.detail || 'Failed to reject.'); }
   }
 
   async function handleFileChange(e) {
@@ -53,21 +67,8 @@ export default function HomePage() {
     }
   }
 
-  async function handleApprove(id) {
-    try {
-      const updated = await approveAnnotationRequest(id);
-      setRequests((prev) => prev.map((r) => r.id === id ? updated : r));
-    } catch (e) { alert(e.response?.data?.detail || 'Failed to approve.'); }
-  }
-
-  async function handleReject(id) {
-    try {
-      const updated = await rejectAnnotationRequest(id);
-      setRequests((prev) => prev.map((r) => r.id === id ? updated : r));
-    } catch (e) { alert(e.response?.data?.detail || 'Failed to reject.'); }
-  }
-
-  const pendingCount = requests.filter((r) => r.status === 'pending').length;
+  const pendingUploads = uploadGroups.reduce((s, g) => s + g.pending + (g.redo || 0), 0);
+  const pendingRequests = requests.filter((r) => r.status === 'pending').length;
 
   return (
     <div style={{ minHeight: '100vh', backgroundColor: '#f5f6f8' }}>
@@ -82,7 +83,7 @@ export default function HomePage() {
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <span style={{ fontSize: '12px', color: '#aaa' }}>{user?.username}</span>
             {isAdmin && (
-              <button onClick={() => navigate('/admin')} style={S.headerBtn}>Users</button>
+              <button onClick={() => navigate('/admin', { state: { tab: 'users' } })} style={S.headerBtn}>Users</button>
             )}
             <button onClick={() => { logout(); navigate('/login'); }} style={S.headerBtn}>Sign out</button>
           </div>
@@ -112,24 +113,49 @@ export default function HomePage() {
 
           {/* Admin right sidebar */}
           {isAdmin && (
-            <div style={{ width: '300px', flexShrink: 0 }}>
+            <div style={{ width: '300px', flexShrink: 0, display: 'flex', flexDirection: 'column', gap: '14px' }}>
+
+              {/* Approve Uploads shortcut */}
+              <div
+                onClick={() => navigate('/admin', { state: { tab: 'uploads' } })}
+                style={{
+                  backgroundColor: pendingUploads > 0 ? '#fffde7' : '#fff',
+                  borderRadius: '10px',
+                  border: `1px solid ${pendingUploads > 0 ? '#ffe082' : '#e8e8e8'}`,
+                  overflow: 'hidden', cursor: 'pointer',
+                }}
+              >
+                <div style={{
+                  padding: '12px 16px', display: 'flex', alignItems: 'center', gap: '8px',
+                  backgroundColor: pendingUploads > 0 ? '#fffde7' : '#fafafa',
+                }}>
+                  <span style={{ fontWeight: 600, fontSize: '13px', color: '#333', flex: 1 }}>Approve Uploads</span>
+                  {pendingUploads > 0 && (
+                    <span style={{ fontSize: '11px', fontWeight: 700, backgroundColor: '#fff8e1', color: '#e65100', padding: '1px 8px', borderRadius: '10px' }}>
+                      {pendingUploads} pending
+                    </span>
+                  )}
+                  <span style={{ fontSize: '12px', color: '#bbb' }}>→</span>
+                </div>
+              </div>
+
+              {/* Page Requests */}
               <div style={{
-                backgroundColor: '#fff', borderRadius: '10px', border: `1px solid ${pendingCount ? '#c5cae9' : '#e8e8e8'}`,
-                overflow: 'hidden',
+                backgroundColor: '#fff', borderRadius: '10px',
+                border: `1px solid ${pendingRequests ? '#c5cae9' : '#e8e8e8'}`, overflow: 'hidden',
               }}>
                 <div style={{
                   padding: '12px 16px', borderBottom: '1px solid #f0f0f0',
                   display: 'flex', alignItems: 'center', gap: '8px',
-                  backgroundColor: pendingCount ? '#f8f9ff' : '#fafafa',
+                  backgroundColor: pendingRequests ? '#f8f9ff' : '#fafafa',
                 }}>
                   <span style={{ fontWeight: 600, fontSize: '13px', color: '#333', flex: 1 }}>Page Requests</span>
-                  {pendingCount > 0 && (
+                  {pendingRequests > 0 && (
                     <span style={{ fontSize: '11px', fontWeight: 700, backgroundColor: '#e8eaf6', color: '#3949ab', padding: '1px 8px', borderRadius: '10px' }}>
-                      {pendingCount} pending
+                      {pendingRequests} pending
                     </span>
                   )}
                 </div>
-
                 {requests.length === 0 ? (
                   <p style={{ padding: '20px 16px', color: '#bbb', fontSize: '12px', margin: 0 }}>No requests yet.</p>
                 ) : (
@@ -153,9 +179,7 @@ export default function HomePage() {
                           <span style={{ fontSize: '10px', color: '#aaa', marginLeft: '2px' }}>× {r.quantity}</span>
                         </div>
                         {r.status === 'approved' && (
-                          <div style={{ fontSize: '11px', color: '#888' }}>
-                            {r.fulfilled} of {r.quantity} assigned
-                          </div>
+                          <div style={{ fontSize: '11px', color: '#888' }}>{r.fulfilled} of {r.quantity} assigned</div>
                         )}
                         {r.status === 'pending' && (
                           <div style={{ display: 'flex', gap: '6px' }}>
@@ -168,6 +192,7 @@ export default function HomePage() {
                   </div>
                 )}
               </div>
+
             </div>
           )}
         </div>
@@ -178,10 +203,6 @@ export default function HomePage() {
 }
 
 const S = {
-  headerBtn: {
-    background: 'none', border: '1px solid #ddd', borderRadius: '6px',
-    padding: '5px 12px', cursor: 'pointer', fontSize: '12px', color: '#555',
-  },
   approveBtn: {
     flex: 1, padding: '4px 0', fontSize: '11px', fontWeight: 600,
     border: '1px solid #a5d6a7', color: '#2e7d32', backgroundColor: '#f1f8f1',
@@ -191,6 +212,10 @@ const S = {
     flex: 1, padding: '4px 0', fontSize: '11px', fontWeight: 600,
     border: '1px solid #ffcdd2', color: '#c62828', backgroundColor: '#fff5f5',
     borderRadius: '4px', cursor: 'pointer',
+  },
+  headerBtn: {
+    background: 'none', border: '1px solid #ddd', borderRadius: '6px',
+    padding: '5px 12px', cursor: 'pointer', fontSize: '12px', color: '#555',
   },
 };
 

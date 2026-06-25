@@ -12,7 +12,7 @@ import numpy as np
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageEnhance, ImageOps
 import io
@@ -25,7 +25,9 @@ from database import get_conn, init_db
 
 REPO_ROOT   = Path(__file__).parent.parent
 UPLOADS_DIR = REPO_ROOT / "storage" / "uploads"
+RAW_DIR     = REPO_ROOT / "storage" / "raw"
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+RAW_DIR.mkdir(parents=True, exist_ok=True)
 
 VALID_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
@@ -66,6 +68,7 @@ app.add_middleware(
 )
 
 app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
+app.mount("/raw", StaticFiles(directory=str(RAW_DIR)), name="raw")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -104,6 +107,15 @@ def _require_editable_page(page_name: str, current: dict):
         raise HTTPException(404, "Page not found")
     if dict(row)["area"] == "approved" and current["role"] != "admin":
         raise HTTPException(403, "Page is approved and locked")
+
+
+def _get_or_create_folder(cur, medium: str, cls: str, subject: str) -> int:
+    cur.execute("""
+        INSERT INTO folders (medium, cls, subject) VALUES (%s, %s, %s)
+        ON CONFLICT (medium, cls, subject) DO UPDATE SET medium = EXCLUDED.medium
+        RETURNING id
+    """, (medium, cls, subject))
+    return cur.fetchone()["id"]
 
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
@@ -175,8 +187,25 @@ def delete_user(username: str, current: dict = Depends(require_admin)):
 
 # ── Corner detection ──────────────────────────────────────────────────────────
 
+def _quad_from_mask(mask: np.ndarray, sw: int, sh: int, min_frac: float = 0.08):
+    """Return [[x,y],…] × 4 for the largest quad-shaped contour in mask, or None."""
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)
+    min_area = sw * sh * min_frac
+    for cnt in contours[:5]:
+        if cv2.contourArea(cnt) < min_area:
+            break
+        for source in [cnt, cv2.convexHull(cnt)]:
+            peri = cv2.arcLength(source, True)
+            for eps in [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.10, 0.12, 0.15, 0.20]:
+                approx = cv2.approxPolyDP(source, eps * peri, True)
+                if len(approx) == 4 and cv2.isContourConvex(approx):
+                    return approx.reshape(4, 2).tolist()
+    return None
+
+
 def _detect_corners(image_bytes: bytes) -> list:
-    margin = 0.05
+    margin   = 0.05
     fallback = [[margin, margin], [1-margin, margin], [1-margin, 1-margin], [margin, 1-margin]]
 
     nparr = np.frombuffer(image_bytes, np.uint8)
@@ -184,46 +213,45 @@ def _detect_corners(image_bytes: bytes) -> list:
     if img is None:
         return fallback
 
-    h, w  = img.shape[:2]
-    scale = min(1.0, 1024 / max(h, w))
-    small = cv2.resize(img, None, fx=scale, fy=scale)
+    h, w   = img.shape[:2]
+    scale  = min(1.0, 800 / max(h, w))
+    small  = cv2.resize(img, None, fx=scale, fy=scale)
     sh, sw = small.shape[:2]
+    gray   = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
 
-    gray     = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-    # Bilateral filter preserves paper edges while smoothing texture
-    filtered = cv2.bilateralFilter(gray, 9, 75, 75)
+    quad = None
 
-    # Auto Canny thresholds derived from image median
-    v     = np.median(filtered)
-    lo    = int(max(0,   0.67 * v))
-    hi    = int(min(255, 1.33 * v))
-    edges = cv2.Canny(filtered, lo, hi)
+    # ── Strategy 1: saturation (white paper = low saturation, surfaces = higher) ──
+    hsv   = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+    paper = ((hsv[:, :, 1] < 55) & (hsv[:, :, 2] > 60)).astype(np.uint8) * 255
+    paper = cv2.morphologyEx(paper, cv2.MORPH_CLOSE, np.ones((20, 20), np.uint8), iterations=3)
+    paper = cv2.morphologyEx(paper, cv2.MORPH_OPEN,  np.ones((10, 10), np.uint8), iterations=1)
+    quad  = _quad_from_mask(paper, sw, sh, min_frac=0.08)
 
-    kernel  = np.ones((5, 5), np.uint8)
-    dilated = cv2.dilate(edges, kernel, iterations=3)
+    # ── Strategy 2: CLAHE + Canny ──
+    if quad is None:
+        clahe    = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+        blurred  = cv2.GaussianBlur(enhanced, (5, 5), 0)
+        v        = np.median(blurred)
+        edges    = cv2.Canny(blurred, max(0, int(0.3 * v)), min(255, int(1.3 * v)))
+        edges    = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8), iterations=2)
+        edges    = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=2)
+        quad     = _quad_from_mask(edges, sw, sh, min_frac=0.08)
 
-    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    contours     = sorted(contours, key=cv2.contourArea, reverse=True)
+    # ── Strategy 3: Otsu threshold ──
+    if quad is None:
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        if np.count_nonzero(thresh) > sh * sw * 0.65:
+            thresh = cv2.bitwise_not(thresh)
+        closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8), iterations=3)
+        quad   = _quad_from_mask(closed, sw, sh, min_frac=0.08)
 
-    doc      = None
-    min_area = sw * sh * 0.15
-
-    for cnt in contours:
-        if cv2.contourArea(cnt) < min_area:
-            break
-        peri = cv2.arcLength(cnt, True)
-        for eps in [0.02, 0.03, 0.04, 0.05, 0.06]:
-            approx = cv2.approxPolyDP(cnt, eps * peri, True)
-            if len(approx) == 4 and cv2.isContourConvex(approx):
-                doc = approx.reshape(4, 2).astype(np.float32)
-                break
-        if doc is not None:
-            break
-
-    if doc is None:
+    if quad is None:
         return fallback
 
-    pts  = doc / np.array([sw, sh], dtype=np.float32)
+    pts  = np.array(quad, dtype=np.float32) / np.array([sw, sh], dtype=np.float32)
     s    = pts[:, 0] + pts[:, 1]
     diff = pts[:, 0] - pts[:, 1]
     tl   = pts[np.argmin(s)].tolist()
@@ -247,36 +275,75 @@ _SUBJECT_ABBR = {"english": "eng", "kannada": "kan", "science": "sci",
                  "social_science": "ssc", "maths": "mat"}
 
 
-def _next_seq(cur, medium: str, cls: str, subject: str, m: str, c: str, s: str) -> int:
-    prefix = f"{m}_{c}_{s}_"
+def _next_student_id(cur, folder_id: int, m: str, c: str, s: str) -> int:
+    id_prefix = f"{m}_{c}_{s}_id"
     cur.execute(
-        "SELECT page_name FROM pages WHERE medium = %s AND cls = %s AND subject = %s",
-        (medium, cls, subject),
+        "SELECT doc_name FROM documents WHERE folder_id = %s",
+        (folder_id,),
     )
-    max_seq = 0
+    max_id = 0
     for row in cur.fetchall():
-        name = row["page_name"]
-        if name.startswith(prefix):
+        name = row["doc_name"]
+        if name.startswith(id_prefix):
             try:
-                max_seq = max(max_seq, int(name[len(prefix):]))
+                max_id = max(max_id, int(name[len(id_prefix):]))
             except ValueError:
                 pass
-    return max_seq + 1
+    return max_id + 1
+
+
+# ── Image warp + preprocessing ────────────────────────────────────────────────
+
+def _apply_warp(image_bytes: bytes, corners_norm: list) -> bytes:
+    """Clip image to the selected quad, crop to its bounding box, scale to fit
+    within 1240×1754, then pad with white to exactly 1240×1754.
+    corners_norm: [TL, TR, BR, BL] each as [fx, fy] in [0, 1].
+    """
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    img   = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError("Could not decode image")
+    h, w = img.shape[:2]
+
+    pts_px = np.array([[c[0] * w, c[1] * h] for c in corners_norm], dtype=np.float32)
+
+    # Mask outside the quad with white
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.fillPoly(mask, [pts_px.astype(np.int32)], 255)
+    white = np.full_like(img, 255)
+    img = np.where(mask[:, :, np.newaxis] == 255, img, white)
+
+    # Crop to bounding box
+    x0 = max(0, int(np.floor(pts_px[:, 0].min())))
+    y0 = max(0, int(np.floor(pts_px[:, 1].min())))
+    x1 = min(w, int(np.ceil(pts_px[:, 0].max())))
+    y1 = min(h, int(np.ceil(pts_px[:, 1].max())))
+    cropped = img[y0:y1, x0:x1]
+    crop_h, crop_w = cropped.shape[:2]
+
+    target_w, target_h = 1240, 1754
+    scale = min(target_w / max(crop_w, 1), target_h / max(crop_h, 1), 1.0)
+    new_w = int(round(crop_w * scale))
+    new_h = int(round(crop_h * scale))
+    interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_LANCZOS4
+    scaled = cv2.resize(cropped, (new_w, new_h), interpolation=interp)
+
+    pad_top    = (target_h - new_h) // 2
+    pad_bottom = target_h - new_h - pad_top
+    pad_left   = (target_w - new_w) // 2
+    pad_right  = target_w - new_w - pad_left
+    result = cv2.copyMakeBorder(scaled, pad_top, pad_bottom, pad_left, pad_right,
+                                cv2.BORDER_CONSTANT, value=(255, 255, 255))
+
+    buf = io.BytesIO()
+    Image.fromarray(cv2.cvtColor(result, cv2.COLOR_BGR2RGB)).save(buf, format="JPEG", quality=92, optimize=True)
+    return buf.getvalue()
 
 
 # ── Image preprocessing ───────────────────────────────────────────────────────
 
 def _preprocess(contents: bytes) -> bytes:
-    with Image.open(io.BytesIO(contents)) as img:
-        if img.mode not in ("RGB", "L"):
-            img = img.convert("RGB")
-        # Stretch tonal range so paper is white and ink is dark
-        img = ImageOps.autocontrast(img, cutoff=1)
-        # Fixed contrast boost for consistent ink visibility
-        img = ImageEnhance.Contrast(img).enhance(1.4)
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=92, optimize=True)
-        return buf.getvalue()
+    return contents
 
 
 # ── Upload ────────────────────────────────────────────────────────────────────
@@ -284,9 +351,10 @@ def _preprocess(contents: bytes) -> bytes:
 @app.post("/upload")
 async def upload_files(
     files: List[UploadFile] = File(...),
-    medium:  str = Form("english_medium"),
-    cls:     str = Form("class_8"),
-    subject: str = Form("english"),
+    medium:      str = Form("english_medium"),
+    cls:         str = Form("class_8"),
+    subject:     str = Form("english"),
+    corners_json: Optional[str] = Form(None),
     current: dict = Depends(get_current_user),
 ):
     if not files:
@@ -299,26 +367,53 @@ async def upload_files(
     c = _CLASS_ABBR.get(cls, cls)
     s = _SUBJECT_ABBR.get(subject, subject)
 
+    all_corners: list = []
+    if corners_json:
+        try:
+            all_corners = json.loads(corners_json)
+        except Exception:
+            pass
+
     page_names = []
 
     conn = get_conn()
     cur  = conn.cursor()
-    base_seq = _next_seq(cur, medium, cls, subject, m, c, s)
-    doc_name = f"{m}_{c}_{s}_{base_seq}"
+    folder_id  = _get_or_create_folder(cur, medium, cls, subject)
+    student_id = _next_student_id(cur, folder_id, m, c, s)
+    doc_name   = f"{m}_{c}_{s}_id{student_id}"
+
+    cur.execute(
+        "INSERT INTO documents (doc_name, folder_id, uploaded_by) VALUES (%s, %s, %s) RETURNING id",
+        (doc_name, folder_id, current["username"]),
+    )
+    doc_id = cur.fetchone()["id"]
 
     for page_num, upload in enumerate(files, start=1):
         ext = Path(upload.filename or "").suffix.lower()
         if ext not in VALID_EXTS:
             ext = ".jpg"
-        seq       = base_seq + page_num - 1
-        page_name = f"{m}_{c}_{s}_{seq}"
+        page_name = f"{m}_{c}_{s}_id{student_id}_{page_num}"
         fname     = f"{page_name}{ext}"
         file_path = dest_dir / fname
-        contents  = await upload.read()
+        raw_bytes = await upload.read()
+
+        # Save original (raw) bytes untouched
+        raw_dest = RAW_DIR / medium / cls / subject
+        raw_dest.mkdir(parents=True, exist_ok=True)
+        (raw_dest / fname).write_bytes(raw_bytes)
+        raw_image_path = f"{medium}/{cls}/{subject}/{fname}"
+
+        page_corners = all_corners[page_num - 1] if page_num - 1 < len(all_corners) else None
+        corners_str  = json.dumps(page_corners) if page_corners is not None else None
+
+        # Apply perspective warp if corners provided, then preprocess
+        contents = raw_bytes
         try:
+            if page_corners and len(page_corners) == 4:
+                contents = _apply_warp(raw_bytes, page_corners)
             contents = _preprocess(contents)
         except Exception:
-            pass  # keep original if preprocessing fails
+            contents = raw_bytes
 
         width = height = None
         try:
@@ -328,15 +423,14 @@ async def upload_files(
             pass
 
         file_path.write_bytes(contents)
-
         image_path = f"{medium}/{cls}/{subject}/{fname}"
 
         cur.execute(
             """
-            INSERT INTO pages (page_name, doc_name, page_number, medium, cls, subject, image_path, width, height, uploaded_by)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO pages (page_name, doc_id, page_number, image_path, raw_image_path, width, height, crop_corners)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
-            (page_name, doc_name, page_num, medium, cls, subject, image_path, width, height, current["username"]),
+            (page_name, doc_id, page_num, image_path, raw_image_path, width, height, corners_str),
         )
         page_names.append({"display_name": page_name, "page_number": page_num})
 
@@ -349,18 +443,37 @@ async def upload_files(
 
 # ── Documents ─────────────────────────────────────────────────────────────────
 
+@app.get("/folders")
+def list_folders(_: dict = Depends(get_current_user)):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT f.id, f.medium, f.cls, f.subject,
+               COUNT(DISTINCT d.id) AS doc_count,
+               COUNT(p.page_name)   AS page_count
+        FROM folders f
+        LEFT JOIN documents d ON d.folder_id = f.id
+        LEFT JOIN pages p ON p.doc_id = d.id
+        GROUP BY f.id
+        ORDER BY f.medium, f.cls, f.subject
+    """)
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close(); conn.close()
+    return rows
+
+
 @app.get("/documents")
 def list_documents(_: dict = Depends(get_current_user)):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT p.*, d.first_upload
-        FROM pages p
-        JOIN (
-            SELECT doc_name, MIN(uploaded_at) AS first_upload
-            FROM pages GROUP BY doc_name
-        ) d ON p.doc_name = d.doc_name
-        ORDER BY d.first_upload DESC, p.page_number
+        SELECT d.doc_name, d.uploaded_at, d.uploaded_by,
+               f.medium, f.cls, f.subject,
+               p.page_name, p.page_number, p.area
+        FROM documents d
+        JOIN folders f ON f.id = d.folder_id
+        LEFT JOIN pages p ON p.doc_id = d.id
+        ORDER BY d.uploaded_at DESC, p.page_number ASC
     """)
     rows = [dict(r) for r in cur.fetchall()]
     cur.close()
@@ -372,16 +485,21 @@ def list_documents(_: dict = Depends(get_current_user)):
         if dname not in docs:
             docs[dname] = {
                 "display_name": dname,
-                "upload_date": row["first_upload"].isoformat() if row["first_upload"] else None,
-                "page_count": 0,
-                "pages": [],
+                "upload_date":  row["uploaded_at"].isoformat() if row["uploaded_at"] else None,
+                "uploaded_by":  row["uploaded_by"],
+                "medium":       row["medium"],
+                "cls":          row["cls"],
+                "subject":      row["subject"],
+                "page_count":   0,
+                "pages":        [],
             }
-        docs[dname]["pages"].append({
-            "display_name": row["page_name"],
-            "page_number":  row["page_number"],
-            "status":       row["area"],
-        })
-        docs[dname]["page_count"] = len(docs[dname]["pages"])
+        if row["page_name"]:
+            docs[dname]["pages"].append({
+                "display_name": row["page_name"],
+                "page_number":  row["page_number"],
+                "status":       row["area"],
+            })
+            docs[dname]["page_count"] = len(docs[dname]["pages"])
 
     return list(docs.values())
 
@@ -390,18 +508,18 @@ def list_documents(_: dict = Depends(get_current_user)):
 def update_document(doc_name: str, data: schemas.DocumentUpdate, _: dict = Depends(get_current_user)):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT 1 FROM pages WHERE doc_name = %s LIMIT 1", (doc_name,))
+    cur.execute("SELECT 1 FROM documents WHERE doc_name = %s", (doc_name,))
     if not cur.fetchone():
         cur.close(); conn.close()
         raise HTTPException(404, "Document not found")
 
     new_name = _validate_name(data.display_name) if data.display_name else doc_name
     if new_name != doc_name:
-        cur.execute("SELECT 1 FROM pages WHERE doc_name = %s LIMIT 1", (new_name,))
+        cur.execute("SELECT 1 FROM documents WHERE doc_name = %s", (new_name,))
         if cur.fetchone():
             cur.close(); conn.close()
             raise HTTPException(409, f"A document named '{new_name}' already exists.")
-        cur.execute("UPDATE pages SET doc_name = %s WHERE doc_name = %s", (new_name, doc_name))
+        cur.execute("UPDATE documents SET doc_name = %s WHERE doc_name = %s", (new_name, doc_name))
         conn.commit()
 
     cur.close(); conn.close()
@@ -412,7 +530,12 @@ def update_document(doc_name: str, data: schemas.DocumentUpdate, _: dict = Depen
 def delete_document(doc_name: str, _: dict = Depends(get_current_user)):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT page_name, image_path FROM pages WHERE doc_name = %s", (doc_name,))
+    cur.execute("""
+        SELECT p.page_name, p.image_path, p.raw_image_path
+        FROM pages p
+        JOIN documents d ON d.id = p.doc_id
+        WHERE d.doc_name = %s
+    """, (doc_name,))
     pages = [dict(r) for r in cur.fetchall()]
     if not pages:
         cur.close(); conn.close()
@@ -423,7 +546,13 @@ def delete_document(doc_name: str, _: dict = Depends(get_current_user)):
             (UPLOADS_DIR / page["image_path"]).unlink(missing_ok=True)
         except Exception:
             pass
-    cur.execute("DELETE FROM pages WHERE doc_name = %s", (doc_name,))
+        try:
+            if page.get("raw_image_path"):
+                (RAW_DIR / page["raw_image_path"]).unlink(missing_ok=True)
+        except Exception:
+            pass
+    # ON DELETE CASCADE removes pages and their boxes
+    cur.execute("DELETE FROM documents WHERE doc_name = %s", (doc_name,))
     conn.commit()
     cur.close(); conn.close()
     return {"deleted": doc_name}
@@ -435,13 +564,96 @@ def delete_document(doc_name: str, _: dict = Depends(get_current_user)):
 def my_uploads(current: dict = Depends(get_current_user)):
     conn = get_conn()
     cur  = conn.cursor()
-    cur.execute(
-        "SELECT * FROM pages WHERE uploaded_by = %s ORDER BY uploaded_at DESC",
-        (current["username"],),
-    )
+    cur.execute("""
+        SELECT p.*, d.doc_name, d.uploaded_by, d.uploaded_at, f.medium, f.cls, f.subject
+        FROM pages p
+        JOIN documents d ON d.id = p.doc_id
+        JOIN folders f ON f.id = d.folder_id
+        WHERE d.uploaded_by = %s
+        ORDER BY d.uploaded_at DESC, p.page_number ASC
+    """, (current["username"],))
     rows = [dict(r) for r in cur.fetchall()]
     cur.close(); conn.close()
     return rows
+
+
+# ── Admin: upload approval ────────────────────────────────────────────────────
+
+@app.get("/admin/uploads")
+def admin_uploads(_: dict = Depends(require_admin)):
+    conn = get_conn()
+    cur  = conn.cursor()
+    cur.execute("""
+        SELECT p.page_name, d.doc_name, p.page_number, f.medium, f.cls, f.subject,
+               p.image_path, p.raw_image_path, d.uploaded_by, d.uploaded_at,
+               p.upload_approval_status, p.upload_approval_note
+        FROM pages p
+        JOIN documents d ON d.id = p.doc_id
+        JOIN folders f ON f.id = d.folder_id
+        ORDER BY d.uploaded_by, d.doc_name, p.page_number
+    """)
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close(); conn.close()
+
+    by_user = {}
+    for row in rows:
+        user = row["uploaded_by"] or ""
+        if user not in by_user:
+            by_user[user] = {"username": user, "pending": 0, "redo": 0, "approved": 0, "flagged": 0, "uploads": []}
+        by_user[user]["uploads"].append(row)
+        status = row["upload_approval_status"] or "pending"
+        if status in by_user[user]:
+            by_user[user][status] += 1
+
+    return sorted(by_user.values(), key=lambda x: x["username"])
+
+
+@app.patch("/admin/pages/{page_name}/approve-upload")
+def admin_approve_upload(page_name: str, _: dict = Depends(require_admin)):
+    conn = get_conn()
+    cur  = conn.cursor()
+    cur.execute("SELECT 1 FROM pages WHERE page_name = %s", (page_name,))
+    if not cur.fetchone():
+        cur.close(); conn.close(); raise HTTPException(404, "Page not found")
+    cur.execute("""
+        UPDATE pages SET upload_approval_status = 'approved', upload_approval_note = NULL
+        WHERE page_name = %s RETURNING page_name, upload_approval_status
+    """, (page_name,))
+    updated = dict(cur.fetchone())
+    conn.commit(); cur.close(); conn.close()
+    return updated
+
+
+@app.patch("/admin/pages/{page_name}/unflag-upload")
+def admin_unflag_upload(page_name: str, _: dict = Depends(require_admin)):
+    conn = get_conn()
+    cur  = conn.cursor()
+    cur.execute("SELECT 1 FROM pages WHERE page_name = %s", (page_name,))
+    if not cur.fetchone():
+        cur.close(); conn.close(); raise HTTPException(404, "Page not found")
+    cur.execute("""
+        UPDATE pages SET upload_approval_status = 'pending', upload_approval_note = NULL
+        WHERE page_name = %s RETURNING page_name, upload_approval_status
+    """, (page_name,))
+    updated = dict(cur.fetchone())
+    conn.commit(); cur.close(); conn.close()
+    return updated
+
+
+@app.patch("/admin/pages/{page_name}/flag-upload")
+def admin_flag_upload(page_name: str, body: schemas.UploadApprovalAction, _: dict = Depends(require_admin)):
+    conn = get_conn()
+    cur  = conn.cursor()
+    cur.execute("SELECT 1 FROM pages WHERE page_name = %s", (page_name,))
+    if not cur.fetchone():
+        cur.close(); conn.close(); raise HTTPException(404, "Page not found")
+    cur.execute("""
+        UPDATE pages SET upload_approval_status = 'flagged', upload_approval_note = %s
+        WHERE page_name = %s RETURNING page_name, upload_approval_status, upload_approval_note
+    """, (body.note, page_name))
+    updated = dict(cur.fetchone())
+    conn.commit(); cur.close(); conn.close()
+    return updated
 
 
 # ── Annotator: assigned pages ─────────────────────────────────────────────────
@@ -451,12 +663,15 @@ def my_pages(current: dict = Depends(get_current_user)):
     conn = get_conn()
     cur  = conn.cursor()
     cur.execute("""
-        SELECT p.*, COUNT(b.id) AS box_count
+        SELECT p.*, COUNT(b.id) AS box_count,
+               d.doc_name, d.uploaded_at, f.medium, f.cls, f.subject
         FROM pages p
         LEFT JOIN boxes b ON b.page_name = p.page_name
+        JOIN documents d ON d.id = p.doc_id
+        JOIN folders f ON f.id = d.folder_id
         WHERE p.assigned_to = %s
-        GROUP BY p.page_name
-        ORDER BY p.uploaded_at DESC
+        GROUP BY p.page_name, d.doc_name, d.uploaded_at, f.medium, f.cls, f.subject
+        ORDER BY d.uploaded_at DESC, p.page_number ASC
     """, (current["username"],))
     rows = [dict(r) for r in cur.fetchall()]
     cur.close(); conn.close()
@@ -471,10 +686,11 @@ def create_annotation_request(body: schemas.AnnotationRequestCreate, current: di
         raise HTTPException(403, "Annotators only")
     conn = get_conn()
     cur  = conn.cursor()
+    folder_id = _get_or_create_folder(cur, body.medium, body.cls, body.subject)
     cur.execute("""
-        INSERT INTO annotation_requests (requested_by, medium, cls, subject, quantity)
-        VALUES (%s, %s, %s, %s, %s) RETURNING *
-    """, (current["username"], body.medium, body.cls, body.subject, body.quantity))
+        INSERT INTO annotation_requests (requested_by, medium, cls, subject, folder_id, quantity)
+        VALUES (%s, %s, %s, %s, %s, %s) RETURNING *
+    """, (current["username"], body.medium, body.cls, body.subject, folder_id, body.quantity))
     row = dict(cur.fetchone())
     conn.commit(); cur.close(); conn.close()
     return row
@@ -510,13 +726,16 @@ def approve_annotation_request(req_id: int, current: dict = Depends(get_current_
     req = dict(req)
     if req["status"] != "pending":
         cur.close(); conn.close(); raise HTTPException(400, "Already reviewed")
+    if not req.get("folder_id"):
+        cur.close(); conn.close(); raise HTTPException(400, "Request has no folder — re-submit the request")
 
     cur.execute("""
-        SELECT page_name FROM pages
-        WHERE medium = %s AND cls = %s AND subject = %s AND assigned_to IS NULL
-        ORDER BY uploaded_at ASC
+        SELECT p.page_name FROM pages p
+        JOIN documents d ON d.id = p.doc_id
+        WHERE d.folder_id = %s AND p.assigned_to IS NULL AND p.upload_approval_status = 'approved'
+        ORDER BY d.uploaded_at ASC, p.page_number ASC
         LIMIT %s
-    """, (req["medium"], req["cls"], req["subject"], req["quantity"]))
+    """, (req["folder_id"], req["quantity"]))
     pages = [r["page_name"] for r in cur.fetchall()]
 
     if pages:
@@ -563,7 +782,13 @@ def reject_annotation_request(req_id: int, current: dict = Depends(get_current_u
 def get_page(page_name: str, _: dict = Depends(get_current_user)):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM pages WHERE page_name = %s", (page_name,))
+    cur.execute("""
+        SELECT p.*, d.doc_name, d.uploaded_at, d.uploaded_by, f.medium, f.cls, f.subject
+        FROM pages p
+        JOIN documents d ON d.id = p.doc_id
+        JOIN folders f ON f.id = d.folder_id
+        WHERE p.page_name = %s
+    """, (page_name,))
     row = cur.fetchone()
     cur.close(); conn.close()
     if not row:
@@ -615,11 +840,113 @@ def rename_page(page_name: str, payload: schemas.PageRename, _: dict = Depends(g
     return {"display_name": new_name}
 
 
+@app.get("/pages/{page_name}/raw")
+def get_raw_image(page_name: str, current: dict = Depends(get_current_user)):
+    conn = get_conn()
+    cur  = conn.cursor()
+    cur.execute("""
+        SELECT p.raw_image_path, d.uploaded_by
+        FROM pages p
+        JOIN documents d ON d.id = p.doc_id
+        WHERE p.page_name = %s
+    """, (page_name,))
+    row = cur.fetchone()
+    cur.close(); conn.close()
+    if not row:
+        raise HTTPException(404, "Page not found")
+    if current["role"] not in ("admin", "manager") and row["uploaded_by"] != current["username"]:
+        raise HTTPException(403, "Not allowed")
+    raw_rel = row["raw_image_path"]
+    if not raw_rel:
+        raise HTTPException(404, "No raw image stored for this page")
+    raw_file = RAW_DIR / raw_rel
+    if not raw_file.exists():
+        raise HTTPException(404, "Raw file not found on disk")
+    return FileResponse(str(raw_file), media_type="image/jpeg")
+
+
+@app.patch("/pages/{page_name}/image")
+async def replace_page_image(page_name: str, file: UploadFile = File(...), corners_json: Optional[str] = Form(None), current: dict = Depends(get_current_user)):
+    conn = get_conn()
+    cur  = conn.cursor()
+    cur.execute("""
+        SELECT p.image_path, p.raw_image_path, d.uploaded_by
+        FROM pages p
+        JOIN documents d ON d.id = p.doc_id
+        WHERE p.page_name = %s
+    """, (page_name,))
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close()
+        raise HTTPException(404, "Page not found")
+    if current["role"] not in ("admin", "manager") and row["uploaded_by"] != current["username"]:
+        cur.close(); conn.close()
+        raise HTTPException(403, "Not allowed")
+
+    raw_bytes = await file.read()
+
+    # Parse corners
+    page_corners = None
+    if corners_json:
+        try:
+            page_corners = json.loads(corners_json)
+        except Exception:
+            pass
+
+    # Save original (raw) bytes untouched
+    raw_path = RAW_DIR / row["raw_image_path"] if row["raw_image_path"] else None
+    if raw_path:
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_path.write_bytes(raw_bytes)
+
+    # Apply perspective warp if corners provided, then preprocess
+    contents = raw_bytes
+    try:
+        if page_corners and len(page_corners) == 4:
+            contents = _apply_warp(raw_bytes, page_corners)
+        contents = _preprocess(contents)
+    except Exception:
+        contents = raw_bytes
+
+    img_path = UPLOADS_DIR / row["image_path"]
+    img_path.parent.mkdir(parents=True, exist_ok=True)
+    img_path.write_bytes(contents)
+
+    width = height = None
+    try:
+        with Image.open(io.BytesIO(contents)) as img:
+            width, height = img.size
+    except Exception:
+        pass
+
+    cur.execute("SELECT upload_approval_status FROM pages WHERE page_name = %s", (page_name,))
+    status_row = cur.fetchone()
+    was_flagged = status_row and status_row["upload_approval_status"] == "flagged"
+
+    cur.execute(
+        """UPDATE pages
+           SET width = %s, height = %s, crop_corners = COALESCE(%s, crop_corners)
+               {reset}
+           WHERE page_name = %s""".format(
+            reset=", upload_approval_status = 'redo'" if was_flagged else ""
+        ),
+        (width, height, corners_json, page_name),
+    )
+    conn.commit()
+    cur.close(); conn.close()
+    return {"page_name": page_name, "width": width, "height": height}
+
+
 @app.delete("/pages/{page_name}")
 def delete_page(page_name: str, current: dict = Depends(get_current_user)):
     conn = get_conn()
     cur  = conn.cursor()
-    cur.execute("SELECT image_path, uploaded_by FROM pages WHERE page_name = %s", (page_name,))
+    cur.execute("""
+        SELECT p.image_path, p.raw_image_path, d.uploaded_by
+        FROM pages p
+        JOIN documents d ON d.id = p.doc_id
+        WHERE p.page_name = %s
+    """, (page_name,))
     row = cur.fetchone()
     if not row:
         cur.close(); conn.close()
@@ -629,6 +956,11 @@ def delete_page(page_name: str, current: dict = Depends(get_current_user)):
         raise HTTPException(403, "You can only delete your own uploads")
     try:
         (UPLOADS_DIR / row["image_path"]).unlink(missing_ok=True)
+    except Exception:
+        pass
+    try:
+        if row["raw_image_path"]:
+            (RAW_DIR / row["raw_image_path"]).unlink(missing_ok=True)
     except Exception:
         pass
     cur.execute("DELETE FROM pages WHERE page_name = %s", (page_name,))
@@ -726,13 +1058,16 @@ def manager_pages(current: dict = Depends(require_manager)):
     conn = get_conn()
     cur  = conn.cursor()
     cur.execute("""
-        SELECT p.*, COUNT(b.id) AS box_count
+        SELECT p.*, COUNT(b.id) AS box_count,
+               d.doc_name, d.uploaded_at, d.uploaded_by, f.medium, f.cls, f.subject
         FROM pages p
         LEFT JOIN boxes b ON b.page_name = p.page_name
+        JOIN documents d ON d.id = p.doc_id
+        JOIN folders f ON f.id = d.folder_id
         WHERE p.assigned_to IS NOT NULL
           AND p.area IN ('pending_approval', 'approved', 'needs_rework', 'flagged_admin')
-        GROUP BY p.page_name
-        ORDER BY p.uploaded_at DESC
+        GROUP BY p.page_name, d.doc_name, d.uploaded_at, d.uploaded_by, f.medium, f.cls, f.subject
+        ORDER BY d.uploaded_at DESC, p.page_number ASC
     """)
     rows = [dict(r) for r in cur.fetchall()]
     cur.close(); conn.close()

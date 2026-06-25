@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const BACKEND = import.meta.env.VITE_API_URL || `http://${window.location.hostname}:8000`;
+const BACKEND = import.meta.env.VITE_API_URL || '';
 
 const API = axios.create({ baseURL: BACKEND });
 
@@ -23,6 +23,7 @@ API.interceptors.response.use(
 );
 
 export const IMAGE_BASE_URL = `${BACKEND}/uploads`;
+export const RAW_BASE_URL   = `${BACKEND}/raw`;
 
 function _isRect(pts) {
   if (pts.length !== 4) return false;
@@ -123,6 +124,21 @@ export async function deletePage(pageName) {
   return data;
 }
 
+export async function getRawImage(pageName) {
+  const { data } = await API.get(`/pages/${encodeURIComponent(pageName)}/raw`, { responseType: 'blob' });
+  return data;
+}
+
+export async function replacePageImage(pageName, file, corners = null) {
+  const form = new FormData();
+  form.append('file', file);
+  if (corners) form.append('corners_json', JSON.stringify(corners));
+  const { data } = await API.patch(`/pages/${encodeURIComponent(pageName)}/image`, form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
+  return data;
+}
+
 export async function listUsers() {
   const { data } = await API.get('/users');
   return data;
@@ -150,9 +166,10 @@ export async function detectCorners(file) {
 export async function uploadFiles(files, opts = {}) {
   const form = new FormData();
   files.forEach((f) => form.append('files', f));
-  if (opts.medium)  form.append('medium', opts.medium);
-  if (opts.cls)     form.append('cls', opts.cls);
-  if (opts.subject) form.append('subject', opts.subject);
+  if (opts.medium)       form.append('medium', opts.medium);
+  if (opts.cls)          form.append('cls', opts.cls);
+  if (opts.subject)      form.append('subject', opts.subject);
+  if (opts.cornersArray) form.append('corners_json', JSON.stringify(opts.cornersArray));
   const { data } = await API.post('/upload', form, {
     headers: { 'Content-Type': 'multipart/form-data' },
   });
@@ -271,5 +288,25 @@ export async function sendBackPage(pageName, note) {
 
 export async function flagAdminPage(pageName, note) {
   const { data } = await API.patch(`/manager/pages/${encodeURIComponent(pageName)}/flag-admin`, { note });
+  return data;
+}
+
+export async function getAdminUploads() {
+  const { data } = await API.get('/admin/uploads');
+  return data;
+}
+
+export async function approveUpload(pageName) {
+  const { data } = await API.patch(`/admin/pages/${encodeURIComponent(pageName)}/approve-upload`);
+  return data;
+}
+
+export async function flagUpload(pageName, note) {
+  const { data } = await API.patch(`/admin/pages/${encodeURIComponent(pageName)}/flag-upload`, { note });
+  return data;
+}
+
+export async function unflagUpload(pageName) {
+  const { data } = await API.patch(`/admin/pages/${encodeURIComponent(pageName)}/unflag-upload`);
   return data;
 }

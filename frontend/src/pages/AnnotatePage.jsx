@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   getPage, getPageBoxes, createBox, updateBox, deleteBox, exportPage, renamePage,
-  submitPage, coordsToCoordinates, normalizeBox, IMAGE_BASE_URL,
+  coordsToCoordinates, normalizeBox, IMAGE_BASE_URL,
 } from '../api/client.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import ImageCanvas from '../components/ImageCanvas.jsx';

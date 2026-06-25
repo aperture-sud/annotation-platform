@@ -1,47 +1,8 @@
 import { useState, useRef, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { uploadFiles, detectCorners } from '../api/client.js';
+import { useNavigate, useLocation } from 'react-router-dom';
+import { uploadFiles, detectCorners, replacePageImage, getRawImage } from '../api/client.js';
 import { useAuth } from '../context/AuthContext.jsx';
 
-// ── Perspective warp math ─────────────────────────────────────────────────────
-
-function matMul3(A, B) {
-  const C = [[0,0,0],[0,0,0],[0,0,0]];
-  for (let i = 0; i < 3; i++)
-    for (let j = 0; j < 3; j++)
-      for (let k = 0; k < 3; k++)
-        C[i][j] += A[i][k] * B[k][j];
-  return C;
-}
-
-function matAdj3(m) {
-  return [
-    [ m[1][1]*m[2][2]-m[1][2]*m[2][1], m[0][2]*m[2][1]-m[0][1]*m[2][2], m[0][1]*m[1][2]-m[0][2]*m[1][1] ],
-    [ m[1][2]*m[2][0]-m[1][0]*m[2][2], m[0][0]*m[2][2]-m[0][2]*m[2][0], m[0][2]*m[1][0]-m[0][0]*m[1][2] ],
-    [ m[1][0]*m[2][1]-m[1][1]*m[2][0], m[0][1]*m[2][0]-m[0][0]*m[2][1], m[0][0]*m[1][1]-m[0][1]*m[1][0] ],
-  ];
-}
-
-// Maps unit square [0,0],[1,0],[1,1],[0,1] → quad pts (TL,TR,BR,BL)
-function squareToQuad(pts) {
-  const [p0, p1, p2, p3] = pts;
-  const dx1 = p1[0]-p2[0], dy1 = p1[1]-p2[1];
-  const dx2 = p3[0]-p2[0], dy2 = p3[1]-p2[1];
-  const sx = p0[0]-p1[0]+p2[0]-p3[0], sy = p0[1]-p1[1]+p2[1]-p3[1];
-  const d = dx1*dy2 - dx2*dy1;
-  const g = (sx*dy2 - dx2*sy) / d;
-  const h = (dx1*sy - sx*dy1) / d;
-  return [
-    [p1[0]-p0[0]+g*p1[0], p3[0]-p0[0]+h*p3[0], p0[0]],
-    [p1[1]-p0[1]+g*p1[1], p3[1]-p0[1]+h*p3[1], p0[1]],
-    [g, h, 1],
-  ];
-}
-
-function applyH(H, x, y) {
-  const w = H[2][0]*x + H[2][1]*y + H[2][2];
-  return [(H[0][0]*x + H[0][1]*y + H[0][2])/w, (H[1][0]*x + H[1][1]*y + H[1][2])/w];
-}
 
 function createImageEl(url) {
   return new Promise((res, rej) => {
@@ -52,60 +13,59 @@ function createImageEl(url) {
   });
 }
 
-// src4pts: [[x,y],…] in image-pixel coords, order TL TR BR BL
-// Returns a Blob of the warped A4 image
-async function perspectiveWarp(imageSrc, src4pts) {
+// src4pts: [[x,y],…] in image-pixel coords, order TL TR BR BL.
+// Clips the image to the quad, crops to its bounding box, scales to fit
+// within 1240×1754 if needed, then pads with white to exactly 1240×1754.
+async function cropAndPad(imageSrc, src4pts) {
   const image = await createImageEl(imageSrc);
   const iw = image.naturalWidth, ih = image.naturalHeight;
 
-  // A4 at 150 DPI
-  const outW = 1240, outH = 1754;
-  const dstPts = [[0,0],[outW,0],[outW,outH],[0,outH]];
-
-  // H maps dst → src (inverse, for sampling)
-  const H1 = squareToQuad(src4pts.map(([x,y]) => [x/iw, y/ih]));
-  const H2 = squareToQuad(dstPts.map(([x,y]) => [x/outW, y/outH]));
-  const Hinv = matMul3(
-    squareToQuad(src4pts.map(([x,y]) => [x,y])),
-    matAdj3(squareToQuad(dstPts))
-  );
-  // Simpler: build H directly (dst→src)
-  const Hfwd = matMul3(squareToQuad(src4pts), matAdj3(squareToQuad(dstPts)));
-
+  // Draw image onto canvas, then clip to quad and fill outside with white
   const srcCanvas = document.createElement('canvas');
   srcCanvas.width = iw; srcCanvas.height = ih;
-  srcCanvas.getContext('2d').drawImage(image, 0, 0);
-  const srcPx = srcCanvas.getContext('2d').getImageData(0, 0, iw, ih).data;
+  const srcCtx = srcCanvas.getContext('2d');
+  srcCtx.drawImage(image, 0, 0);
 
-  const dstCanvas = document.createElement('canvas');
-  dstCanvas.width = outW; dstCanvas.height = outH;
-  const dstCtx = dstCanvas.getContext('2d');
-  const dstImg = dstCtx.createImageData(outW, outH);
-  const dst = dstImg.data;
+  srcCtx.globalCompositeOperation = 'destination-in';
+  srcCtx.beginPath();
+  srcCtx.moveTo(src4pts[0][0], src4pts[0][1]);
+  for (let i = 1; i < src4pts.length; i++) srcCtx.lineTo(src4pts[i][0], src4pts[i][1]);
+  srcCtx.closePath();
+  srcCtx.fill();
 
-  for (let dy = 0; dy < outH; dy++) {
-    for (let dx = 0; dx < outW; dx++) {
-      const [sx, sy] = applyH(Hfwd, dx, dy);
-      const fx = Math.floor(sx), fy = Math.floor(sy);
-      if (fx < 0 || fy < 0 || fx >= iw-1 || fy >= ih-1) continue;
-      const ax = sx-fx, ay = sy-fy;
-      const i00 = (fy*iw+fx)*4, i10 = (fy*iw+fx+1)*4;
-      const i01 = ((fy+1)*iw+fx)*4, i11 = ((fy+1)*iw+fx+1)*4;
-      const di = (dy*outW+dx)*4;
-      for (let c = 0; c < 3; c++) {
-        dst[di+c] = Math.round(
-          srcPx[i00+c]*(1-ax)*(1-ay) + srcPx[i10+c]*ax*(1-ay) +
-          srcPx[i01+c]*(1-ax)*ay   + srcPx[i11+c]*ax*ay
-        );
-      }
-      dst[di+3] = 255;
-    }
-  }
-  dstCtx.putImageData(dstImg, 0, 0);
+  srcCtx.globalCompositeOperation = 'destination-over';
+  srcCtx.fillStyle = '#fff';
+  srcCtx.fillRect(0, 0, iw, ih);
+  srcCtx.globalCompositeOperation = 'source-over';
+
+  // Crop to bounding box of the quad
+  const xs = src4pts.map(p => p[0]), ys = src4pts.map(p => p[1]);
+  const x0 = Math.max(0, Math.floor(Math.min(...xs)));
+  const y0 = Math.max(0, Math.floor(Math.min(...ys)));
+  const x1 = Math.min(iw, Math.ceil(Math.max(...xs)));
+  const y1 = Math.min(ih, Math.ceil(Math.max(...ys)));
+  const cropW = x1 - x0, cropH = y1 - y0;
+
+  const targetW = 1240, targetH = 1754;
+  const scale = Math.min(targetW / cropW, targetH / cropH, 1.0);
+  const scaledW = Math.round(cropW * scale);
+  const scaledH = Math.round(cropH * scale);
+  const padLeft = Math.floor((targetW - scaledW) / 2);
+  const padTop  = Math.floor((targetH - scaledH) / 2);
+
+  const finalCanvas = document.createElement('canvas');
+  finalCanvas.width = targetW; finalCanvas.height = targetH;
+  const finalCtx = finalCanvas.getContext('2d');
+  finalCtx.fillStyle = '#fff';
+  finalCtx.fillRect(0, 0, targetW, targetH);
+  finalCtx.drawImage(srcCanvas, x0, y0, cropW, cropH, padLeft, padTop, scaledW, scaledH);
+
   return new Promise((res, rej) =>
-    dstCanvas.toBlob(b => b ? res(b) : rej(new Error('Empty canvas')), 'image/jpeg', 0.9)
+    finalCanvas.toBlob(b => b ? res(b) : rej(new Error('Empty canvas')), 'image/jpeg', 0.9)
   );
 }
+// keep alias so existing call sites work
+const perspectiveWarp = cropAndPad;
 
 // ── Polygon → min-bounding-rect helpers ──────────────────────────────────────
 
@@ -309,7 +269,7 @@ const SUBJECTS = [
 // ── Styles ────────────────────────────────────────────────────────────────────
 
 const S = {
-  page: { display: 'flex', flexDirection: 'column', height: '100vh', backgroundColor: '#f5f6f8', color: '#1a1a1a' },
+  page: { display: 'flex', flexDirection: 'column', height: '100dvh', backgroundColor: '#f5f6f8', color: '#1a1a1a' },
   topbar: { display: 'flex', alignItems: 'center', padding: '10px 16px', backgroundColor: '#fff', borderBottom: '1px solid #e4e4e4', gap: '12px', flexShrink: 0 },
   topbarTitle: { flex: 1, fontWeight: '600', fontSize: '14px', color: '#1a1a1a' },
   counter: { fontSize: '13px', color: '#aaa' },
@@ -328,7 +288,7 @@ const S = {
   slider: { flex: 1, minWidth: '120px', accentColor: '#2196F3' },
   smallBtn: { padding: '5px 12px', fontSize: '12px', borderRadius: '4px', border: '1px solid #555', backgroundColor: '#2a2a3a', color: '#fff', cursor: 'pointer' },
   smallBtnActive: { backgroundColor: '#2196F3', borderColor: '#2196F3' },
-  actionRow: { display: 'flex', gap: '10px', padding: '10px 16px', backgroundColor: '#111', flexShrink: 0, flexWrap: 'wrap' },
+  actionRow: { display: 'flex', gap: '10px', padding: '10px 16px', paddingBottom: 'max(10px, env(safe-area-inset-bottom))', backgroundColor: '#111', flexShrink: 0, flexWrap: 'wrap' },
   actionBtn: { flex: 1, padding: '12px', fontSize: '14px', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: '600', minWidth: '100px' },
 
   thumbStrip: { backgroundColor: '#1a1a2a', overflowX: 'auto', flexShrink: 0 },
@@ -339,11 +299,11 @@ const S = {
   thumbDelete: { position: 'absolute', top: '-6px', right: '-6px', width: '18px', height: '18px', borderRadius: '50%', backgroundColor: '#F44336', color: '#fff', border: 'none', cursor: 'pointer', fontSize: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', lineHeight: 1 },
 
   // Perspective mode
-  perspRoot: { flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' },
-  perspImgArea: { flex: 1, position: 'relative', overflow: 'hidden', backgroundColor: '#000' },
-  perspImg: { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', userSelect: 'none', pointerEvents: 'none' },
-  perspSvg: { position: 'absolute', inset: 0, width: '100%', height: '100%', overflow: 'visible', touchAction: 'none' },
-  perspControls: { backgroundColor: '#1a1a2a', padding: '10px 16px', flexShrink: 0, display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' },
+  perspRoot: { flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', userSelect: 'none', WebkitTouchCallout: 'none' },
+  perspImgArea: { flex: 1, position: 'relative', overflow: 'hidden', backgroundColor: '#000', userSelect: 'none', WebkitTouchCallout: 'none' },
+  perspImg: { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', userSelect: 'none', pointerEvents: 'none', WebkitTouchCallout: 'none' },
+  perspSvg: { position: 'absolute', inset: 0, width: '100%', height: '100%', overflow: 'visible', touchAction: 'none', userSelect: 'none', WebkitTouchCallout: 'none' },
+  perspControls: { backgroundColor: '#1a1a2a', padding: '10px 16px', paddingBottom: 'max(10px, env(safe-area-inset-bottom))', flexShrink: 0, display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' },
   perspInfo: { flex: 1, fontSize: '12px', color: '#aaa' },
   setupArea: { flex: 1, display: 'flex', flexDirection: 'column', padding: '28px 20px', gap: '24px', overflowY: 'auto' },
   setupLabel: { fontSize: '12px', color: '#888', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '2px' },
@@ -357,8 +317,10 @@ const S = {
 
 export default function ScannerPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { user } = useAuth();
   const homeRoute = user?.role === 'pictaker' ? '/pictaker' : '/';
+  const recropPageName = location.state?.recropPageName || null;
 
   // 'setup' | 'capture' | 'edit' | 'perspective' | 'polygon' | 'detecting' | 'warp_preview'
   const [mode, setMode] = useState('setup');
@@ -369,9 +331,12 @@ export default function ScannerPage() {
   const [subject, setSubject] = useState('');
   const [imageSrc, setImageSrc] = useState(null);
 
-  // Committed pages: [{blob, thumbUrl, name}]
+  // Committed pages: [{blob, thumbUrl, name, corners, rawFile}]
   const [pages, setPages] = useState([]);
   const [editingIdx, setEditingIdx] = useState(null);
+
+  // The original file for the image currently being edited (pre-warp, full resolution)
+  const [rawImageFile, setRawImageFile] = useState(null);
 
   // Rotation / brightness / contrast
   const [rotation, setRotation] = useState(0);
@@ -417,13 +382,55 @@ export default function ScannerPage() {
 
   useEffect(() => { setPerspImgReady(false); }, [imageSrc]);
 
+  // Preload image / skip setup when navigated here for recrop or retake
+  useEffect(() => {
+    const { recropUrl, recropMedium, recropCls, recropSubject, recropCorners } = location.state || {};
+    if (recropMedium)  setMedium(recropMedium);
+    if (recropCls)     setCls(recropCls);
+    if (recropSubject) setSubject(recropSubject);
+
+    if (!recropUrl) {
+      // Retake flow: no raw image to load, just skip setup and go to capture
+      if (recropMedium && recropCls && recropSubject) setMode('capture');
+      return;
+    }
+
+    getRawImage(recropPageName)
+      .then((blob) => {
+        const file = new File([blob], `${recropPageName}.jpg`, { type: blob.type || 'image/jpeg' });
+        setRawImageFile(file);
+        if (recropCorners && recropCorners.length === 4) {
+          const url = URL.createObjectURL(file);
+          setImageSrc(url);
+          setPreWarpSrc(url);
+          setPerspCorners(recropCorners);
+          setPerspHistory([]);
+          setPerspImgReady(false);
+          setOrigSrc(null);
+          setWarpedSrc(null);
+          setRotation(0);
+          setRotHistory([]);
+          setBrightness(1.0);
+          setContrast(1.0);
+          setPolyPts([]);
+          setEditingIdx(null);
+          setMode('perspective');
+        } else {
+          loadImageWithDetection(file);
+        }
+      })
+      .catch(() => alert('Could not load image for recrop.'));
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   async function loadImageWithDetection(file) {
     if (!file) return;
+    setRawImageFile(file);
     const url = URL.createObjectURL(file);
     setImageSrc(url);
     setPreWarpSrc(url);
     setOrigSrc(null);
     setWarpedSrc(null);
+    setPerspImgReady(false);
     setRotation(0);
     setBrightness(1.0);
     setContrast(1.0);
@@ -536,12 +543,14 @@ export default function ScannerPage() {
   async function handleAddAnother() {
     const pg = await processCurrentPage();
     if (!pg) return;
+    const rf = rawImageFile;
     if (editingIdx !== null) {
-      setPages((prev) => { const a = [...prev]; a[editingIdx] = { ...a[editingIdx], blob: pg.blob, thumbUrl: pg.thumbUrl }; return a; });
+      setPages((prev) => { const a = [...prev]; a[editingIdx] = { ...a[editingIdx], blob: pg.blob, thumbUrl: pg.thumbUrl, corners: perspCorners, rawFile: rf }; return a; });
       setEditingIdx(null);
     } else {
-      setPages((prev) => [...prev, { ...pg, name: `Page ${prev.length + 1}` }]);
+      setPages((prev) => [...prev, { ...pg, name: `Page ${prev.length + 1}`, corners: perspCorners, rawFile: rf }]);
     }
+    setRawImageFile(null);
     setImageSrc(null);
     setMode('capture');
   }
@@ -549,15 +558,26 @@ export default function ScannerPage() {
   async function handleDone() {
     const pg = await processCurrentPage();
     if (!pg) return;
-    const allPages = editingIdx !== null
-      ? pages.map((p, i) => (i === editingIdx ? { ...p, blob: pg.blob, thumbUrl: pg.thumbUrl } : p))
-      : [...pages, { ...pg, name: `Page ${pages.length + 1}` }];
+    const rf = rawImageFile;
     setUploading(true);
     try {
-      const files = allPages.map((p, i) =>
-        new File([p.blob], `${p.name || `page_${i+1}`}.jpg`, { type: 'image/jpeg' })
-      );
-      await uploadFiles(files, { medium, cls, subject });
+      if (recropPageName) {
+        // Send original file; backend applies warp + preprocessing
+        const uploadFile = rf
+          ? new File([rf], `${recropPageName}.jpg`, { type: rf.type || 'image/jpeg' })
+          : new File([pg.blob], `${recropPageName}.jpg`, { type: 'image/jpeg' });
+        await replacePageImage(recropPageName, uploadFile, perspCorners);
+      } else {
+        const finalRawFile = rf;
+        const allPages = editingIdx !== null
+          ? pages.map((p, i) => (i === editingIdx ? { ...p, blob: pg.blob, thumbUrl: pg.thumbUrl, corners: perspCorners, rawFile: finalRawFile } : p))
+          : [...pages, { ...pg, name: `Page ${pages.length + 1}`, corners: perspCorners, rawFile: finalRawFile }];
+        const files = allPages.map((p, i) => {
+          const src = p.rawFile || p.blob;
+          return new File([src], `${p.name || `page_${i+1}`}.jpg`, { type: 'image/jpeg' });
+        });
+        await uploadFiles(files, { medium, cls, subject, cornersArray: allPages.map((p) => p.corners || null) });
+      }
       navigate('/pictaker');
     } catch (e) {
       console.error('Upload failed', e);
@@ -569,11 +589,45 @@ export default function ScannerPage() {
 
   function handleRetake() { setImageSrc(null); setMode('capture'); }
 
+  // ── Browser back/forward via history API ─────────────────────────────────────
+  const popstateActive = useRef(false);
+  const modeRef = useRef(mode);
+  useEffect(() => { modeRef.current = mode; }, [mode]);
+
+  // Push a history entry for navigable stages
+  useEffect(() => {
+    if (mode !== 'setup' && mode !== 'capture' && mode !== 'edit') return;
+    if (popstateActive.current) { popstateActive.current = false; return; }
+    if (!window.history.state?.scannerMode) {
+      window.history.replaceState({ scannerMode: mode }, '');
+    } else {
+      window.history.pushState({ scannerMode: mode }, '');
+    }
+  }, [mode]);
+
+  // Handle browser back/forward
+  useEffect(() => {
+    const handler = (e) => {
+      const target = e.state?.scannerMode;
+      if (!target) return;
+      popstateActive.current = true;
+      const cur = modeRef.current;
+      if (target === 'capture' && (cur === 'perspective' || cur === 'detecting' || cur === 'warp_preview')) {
+        setImageSrc(null);
+      }
+      setMode(target);
+    };
+    window.addEventListener('popstate', handler);
+    return () => window.removeEventListener('popstate', handler);
+  }, []);
+
   function handleEditThumb(idx) {
     const pg = pages[idx];
     if (!pg) return;
     setImageSrc(pg.thumbUrl);
     setPreWarpSrc(pg.thumbUrl);
+    setOrigSrc(null);
+    setWarpedSrc(null);
     setRotation(0);
     setRotHistory([]);
     setBrightness(1.0);
@@ -586,6 +640,7 @@ export default function ScannerPage() {
   }
 
   function handleDeleteThumb(idx) {
+    if (!window.confirm('Remove this page?')) return;
     setPages((prev) => prev.filter((_, i) => i !== idx));
   }
 
@@ -672,23 +727,17 @@ export default function ScannerPage() {
     }
   }
 
+
   async function acceptWarp() {
     setImageSrc(warpedSrc);
-    setOrigSrc(null);
-    setWarpedSrc(null);
-    setPerspCorners([[0.05,0.05],[0.95,0.05],[0.95,0.95],[0.05,0.95]]);
-    setPerspHistory([]);
     setRotation(0);
     setRotHistory([]);
-    setBrightness(1.0);
-    setContrast(1.0);
     setMode('edit');
   }
 
   function readjustWarp() {
     setImageSrc(origSrc);
-    // Keep warpedSrc/origSrc so perspective mode can offer "Back to preview"
-    // and so re-applying warp still has access to the original
+    setPerspImgReady(false);
     setMode('perspective');
   }
 
@@ -782,10 +831,13 @@ export default function ScannerPage() {
           </div>
           <div style={{ backgroundColor: '#1a1a2a', padding: '10px 16px', display: 'flex', gap: '10px', alignItems: 'center', flexShrink: 0 }}>
             <span style={{ flex: 1, fontSize: '12px', color: '#aaa' }}>
-              Warp applied. Accept or go back to adjust the corners.
+              Warp applied. Accept or go back to adjust.
             </span>
+            <button style={{ ...S.smallBtn, backgroundColor: '#555' }} onClick={handleRetake}>
+              Retake
+            </button>
             <button style={{ ...S.smallBtn, backgroundColor: '#555' }} onClick={readjustWarp}>
-              Warp manually
+              Change Warp
             </button>
             <button style={{ ...S.smallBtn, backgroundColor: '#4CAF50', borderColor: '#4CAF50' }} onClick={acceptWarp}>
               Accept →
@@ -816,10 +868,11 @@ export default function ScannerPage() {
               onClick={async () => {
                 setUploading(true);
                 try {
-                  const files = pages.map((p, i) =>
-                    new File([p.blob], `${p.name || `page_${i+1}`}.jpg`, { type: 'image/jpeg' })
-                  );
-                  await uploadFiles(files, { medium, cls, subject });
+                  const files = pages.map((p, i) => {
+                    const src = p.rawFile || p.blob;
+                    return new File([src], `${p.name || `page_${i+1}`}.jpg`, { type: 'image/jpeg' });
+                  });
+                  await uploadFiles(files, { medium, cls, subject, cornersArray: pages.map((p) => p.corners || null) });
                   navigate('/pictaker');
                 } catch (e) {
                   alert('Upload failed. Is the backend running?');
@@ -841,15 +894,20 @@ export default function ScannerPage() {
             <div style={{ ...S.thumbStrip, width: '100%', maxWidth: '600px' }}>
               <div style={S.thumbStripInner}>
                 {pages.map((pg, idx) => (
-                  <div key={idx} style={S.thumbWrap}>
-                    <img
-                      src={pg.thumbUrl}
-                      alt={pg.name}
-                      style={{ ...S.thumb, borderColor: 'transparent' }}
-                      onClick={() => handleEditThumb(idx)}
-                      title="Re-edit"
-                    />
-                    <button style={S.thumbDelete} onClick={() => handleDeleteThumb(idx)} title="Remove">✕</button>
+                  <div key={idx} style={S.thumbWrap} onClick={() => handleEditThumb(idx)}>
+                    <div style={{ position: 'relative', cursor: 'pointer' }}>
+                      <img
+                        src={pg.thumbUrl}
+                        alt={pg.name}
+                        style={{ ...S.thumb, borderColor: '#555' }}
+                        draggable={false}
+                        onContextMenu={(e) => e.preventDefault()}
+                      />
+                      <button style={S.thumbDelete} onClick={(e) => { e.stopPropagation(); handleDeleteThumb(idx); }} title="Remove">✕</button>
+                      <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, backgroundColor: 'rgba(0,0,0,0.5)', color: '#fff', fontSize: '9px', textAlign: 'center', padding: '2px 0', borderRadius: '0 0 4px 4px' }}>
+                        Edit
+                      </div>
+                    </div>
                     <input
                       style={S.thumbName}
                       value={pg.name}
@@ -867,13 +925,14 @@ export default function ScannerPage() {
       {/* ── PERSPECTIVE MODE ── */}
       {mode === 'perspective' && imageSrc && (
         <div style={S.perspRoot}>
-          <div ref={perspImgAreaRef} style={S.perspImgArea}>
+          <div ref={perspImgAreaRef} style={S.perspImgArea} onContextMenu={(e) => e.preventDefault()}>
             <img
               ref={perspImgRef}
               src={imageSrc}
               style={S.perspImg}
               alt="perspective"
               draggable={false}
+              onContextMenu={(e) => e.preventDefault()}
               onLoad={() => setPerspImgReady(true)}
             />
             {!perspImgReady && (
@@ -886,6 +945,7 @@ export default function ScannerPage() {
                 style={S.perspSvg}
                 onPointerMove={perspPointerMove}
                 onPointerUp={perspPointerUp}
+                onContextMenu={(e) => e.preventDefault()}
               >
                 {/* Filled quad */}
                 <polygon
@@ -932,11 +992,8 @@ export default function ScannerPage() {
             <button style={{ ...S.smallBtn, backgroundColor: '#555' }} onClick={undoPerspCorners} disabled={!perspHistory.length}>
               ↩ Undo
             </button>
-            <button
-              style={{ ...S.smallBtn, backgroundColor: '#555' }}
-              onClick={() => warpedSrc ? setMode('warp_preview') : setMode('edit')}
-            >
-              {warpedSrc ? '← Preview' : 'Cancel'}
+            <button style={{ ...S.smallBtn, backgroundColor: '#555' }} onClick={handleRetake}>
+              Retake
             </button>
             <button
               style={{ ...S.smallBtn, backgroundColor: '#2196F3', borderColor: '#2196F3' }}
@@ -952,11 +1009,12 @@ export default function ScannerPage() {
       {/* ── POLYGON CROP MODE ── */}
       {mode === 'polygon' && imageSrc && (
         <div style={S.perspRoot}>
-          <div ref={polyImgAreaRef} style={S.perspImgArea}>
-            <img ref={polyImgRef} src={imageSrc} style={S.perspImg} alt="polygon crop" draggable={false} />
+          <div ref={polyImgAreaRef} style={S.perspImgArea} onContextMenu={(e) => e.preventDefault()}>
+            <img ref={polyImgRef} src={imageSrc} style={S.perspImg} alt="polygon crop" draggable={false} onContextMenu={(e) => e.preventDefault()} />
             <svg
               style={{ ...S.perspSvg, cursor: 'crosshair' }}
               onClick={handlePolySvgClick}
+              onContextMenu={(e) => e.preventDefault()}
             >
               {/* Polygon outline */}
               {polyPts.length >= 2 && (
@@ -1010,51 +1068,61 @@ export default function ScannerPage() {
       {mode === 'edit' && imageSrc && (
         <div style={S.editRoot}>
           {/* Image preview */}
-          <div style={{ flex: 1, minHeight: 0, backgroundColor: '#000', overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div
+            style={{ flex: 1, minHeight: 0, backgroundColor: '#000', overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center', userSelect: 'none', WebkitTouchCallout: 'none' }}
+            onContextMenu={(e) => e.preventDefault()}
+          >
             <img
               src={imageSrc}
               alt="preview"
-              style={{
-                maxWidth: '100%', maxHeight: '100%', objectFit: 'contain',
-                transform: `rotate(${rotation}deg)`, transformOrigin: 'center',
-                filter: `brightness(${brightness}) contrast(${contrast})`,
-                userSelect: 'none', display: 'block',
-              }}
+              draggable={false}
+              onContextMenu={(e) => e.preventDefault()}
+              style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', userSelect: 'none', display: 'block', filter: `brightness(${brightness}) contrast(${contrast})`, WebkitTouchCallout: 'none' }}
             />
           </div>
 
-          {/* Knobs row: brightness | rotation | contrast */}
-          <div style={{ backgroundColor: '#1a1a2a', padding: '10px 16px', flexShrink: 0 }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '16px' }}>
-              <ValueKnob value={brightness} onChange={setBrightness} min={0.5} max={2.0} label="Brightness" color="#FFC107" />
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                  <button style={S.smallBtn} onClick={() => changeRotation(r => r - 90)}>↺ 90°</button>
-                  <RotationKnob value={rotation} onChange={changeRotation} />
-                  <button style={S.smallBtn} onClick={() => changeRotation(r => r + 90)}>↻ 90°</button>
-                </div>
-              </div>
-              <ValueKnob value={contrast} onChange={setContrast} min={0.5} max={2.5} label="Contrast" color="#29B6F6" />
+          {/* Brightness / contrast sliders */}
+          <div style={{ backgroundColor: '#1a1a2a', padding: '10px 16px', flexShrink: 0, display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <span style={{ fontSize: '11px', color: '#aaa', width: '70px' }}>Brightness</span>
+              <input type="range" min="0.5" max="2" step="0.01" value={brightness}
+                onChange={(e) => setBrightness(parseFloat(e.target.value))}
+                style={{ flex: 1, accentColor: '#FF9800' }}
+              />
+              <span style={{ fontSize: '11px', color: '#aaa', width: '32px', textAlign: 'right' }}>{brightness.toFixed(2)}</span>
             </div>
-            <div style={{ display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap' }}>
-              <button style={S.smallBtn} onClick={() => {
-                const src = preWarpSrc || imageSrc;
-                setImageSrc(src);
-                setPerspCorners([[0.05,0.05],[0.95,0.05],[0.95,0.95],[0.05,0.95]]);
-                setPerspHistory([]);
-                setMode('perspective');
-              }}>Change Warp</button>
-              <button style={S.smallBtn} onClick={undoRotation} disabled={!rotHistory.length}>↩ Undo</button>
-              <button style={{ ...S.smallBtn, marginLeft: 'auto' }} onClick={() => { setRotHistory([]); setRotation(0); setBrightness(1.0); setContrast(1.0); }}>Reset</button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <span style={{ fontSize: '11px', color: '#aaa', width: '70px' }}>Contrast</span>
+              <input type="range" min="0.5" max="2" step="0.01" value={contrast}
+                onChange={(e) => setContrast(parseFloat(e.target.value))}
+                style={{ flex: 1, accentColor: '#2196F3' }}
+              />
+              <span style={{ fontSize: '11px', color: '#aaa', width: '32px', textAlign: 'right' }}>{contrast.toFixed(2)}</span>
             </div>
+            <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+              <button onClick={() => { setBrightness(1); setContrast(1); }} style={{ ...S.smallBtn, padding: '3px 10px', fontSize: '11px' }}>Reset</button>
+            </div>
+          </div>
+
+          {/* Toolbar: change warp */}
+          <div style={{ backgroundColor: '#1a1a2a', padding: '8px 16px', display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
+            <button style={S.smallBtn} onClick={() => warpedSrc ? setMode('warp_preview') : (() => { setOrigSrc(imageSrc); setPerspImgReady(false); setMode('perspective'); })()}>
+              Change Warp
+            </button>
           </div>
 
           {/* Action buttons */}
           <div style={S.actionRow}>
-            <button style={{ ...S.actionBtn, backgroundColor: '#333', color: '#fff' }} onClick={handleRetake}>Retake</button>
-            <button style={{ ...S.actionBtn, backgroundColor: '#555', color: '#fff' }} onClick={handleAddAnother}>+ Add Page</button>
-            <button style={{ ...S.actionBtn, backgroundColor: '#2196F3', color: '#fff' }} onClick={handleDone} disabled={uploading}>
-              {uploading ? 'Uploading…' : 'Save & Done →'}
+            <button style={{ ...S.actionBtn, fontSize: '16px', padding: '16px', backgroundColor: '#1565C0', color: '#fff' }} onClick={async () => { if (!window.confirm('Save this page and add another?')) return; await handleAddAnother(); }}>+ Add Page</button>
+            <button
+              style={{ ...S.actionBtn, fontSize: '16px', padding: '16px', backgroundColor: '#2E7D32', color: '#fff' }}
+              onClick={async () => {
+                if (!window.confirm('Save and upload all pages?')) return;
+                await handleDone();
+              }}
+              disabled={uploading}
+            >
+              {uploading ? 'Uploading…' : 'Save & Done'}
             </button>
           </div>
 
@@ -1063,12 +1131,18 @@ export default function ScannerPage() {
             <div style={S.thumbStrip}>
               <div style={S.thumbStripInner}>
                 {pages.map((pg, idx) => (
-                  <div key={idx} style={S.thumbWrap}>
-                    <img src={pg.thumbUrl} alt={pg.name}
-                      style={{ ...S.thumb, borderColor: editingIdx === idx ? '#2196F3' : 'transparent' }}
-                      onClick={() => handleEditThumb(idx)} title="Re-edit"
-                    />
-                    <button style={S.thumbDelete} onClick={() => handleDeleteThumb(idx)} title="Remove">✕</button>
+                  <div key={idx} style={S.thumbWrap} onClick={() => handleEditThumb(idx)}>
+                    <div style={{ position: 'relative', cursor: 'pointer' }}>
+                      <img src={pg.thumbUrl} alt={pg.name}
+                        style={{ ...S.thumb, borderColor: editingIdx === idx ? '#2196F3' : '#555' }}
+                        draggable={false}
+                        onContextMenu={(e) => e.preventDefault()}
+                      />
+                      <button style={S.thumbDelete} onClick={(e) => { e.stopPropagation(); handleDeleteThumb(idx); }} title="Remove">✕</button>
+                      <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, backgroundColor: 'rgba(0,0,0,0.5)', color: '#fff', fontSize: '9px', textAlign: 'center', padding: '2px 0', borderRadius: '0 0 4px 4px' }}>
+                        Edit
+                      </div>
+                    </div>
                     <input style={S.thumbName} value={pg.name}
                       onChange={(e) => handleRenamePage(idx, e.target.value)}
                       onClick={(e) => e.stopPropagation()}

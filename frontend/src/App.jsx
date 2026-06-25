@@ -15,6 +15,7 @@ function RootRedirect() {
   const { user } = useAuth();
   if (user?.role === 'annotator') return <Navigate to="/annotator" replace />;
   if (user?.role === 'manager')   return <Navigate to="/manager" replace />;
+  if (user?.role === 'pictaker')  return <Navigate to="/pictaker" replace />;
   return <HomePage />;
 }
 

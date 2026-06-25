@@ -58,3 +58,8 @@ class AnnotationRequestCreate(BaseModel):
 class ReviewAction(BaseModel):
     note: Optional[str] = None
     model_config = {"extra": "ignore"}
+
+
+class UploadApprovalAction(BaseModel):
+    note: Optional[str] = None
+    model_config = {"extra": "ignore"}
