@@ -40,8 +40,9 @@ function _isRect(pts) {
 }
 
 function _rectToCoords(x, y, w, h, rot) {
-  const cos = Math.cos(rot);
-  const sin = Math.sin(rot);
+  const rad = rot * Math.PI / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
   const cx = x + w / 2;
   const cy = y + h / 2;
   const corners = [
@@ -83,7 +84,7 @@ export function normalizeBox(raw) {
   if (_isRect(pts)) {
     const dx = pts[1][0] - pts[0][0];
     const dy = pts[1][1] - pts[0][1];
-    rotation = Math.atan2(dy, dx);
+    rotation = Math.atan2(dy, dx) * 180 / Math.PI;
     width = Math.sqrt(dx * dx + dy * dy);
     const dxh = pts[3][0] - pts[0][0];
     const dyh = pts[3][1] - pts[0][1];

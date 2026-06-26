@@ -542,6 +542,23 @@ export default function AnnotatePage() {
                 </div>
               )}
 
+              {!selectedBox.polygon_points && (
+                <div style={{ padding: '4px 12px', fontSize: '12px', color: '#555', borderBottom: '1px solid #eee', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <span>Rotation</span>
+                  <input
+                    type="number"
+                    min="-360" max="360" step="1"
+                    value={Math.round(selectedBox.rotation || 0)}
+                    onChange={(e) => {
+                      const deg = parseFloat(e.target.value) || 0;
+                      handleBoxGeomUpdate(selectedBox.id, { ...selectedBox, rotation: deg });
+                    }}
+                    style={{ width: '64px', fontSize: '12px', padding: '2px 4px', border: '1px solid #ddd', borderRadius: '3px' }}
+                  />
+                  <span style={{ color: '#aaa' }}>deg</span>
+                </div>
+              )}
+
               <TagForm
                 box={selectedBox} pageName={pageName} onUpdate={handleBoxUpdated} transliterate={transliterate}
                 isPending={selectedBoxId < 0} onCreate={handleBoxCreate} onDiscard={handleBoxDiscard}

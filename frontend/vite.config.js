@@ -42,20 +42,26 @@ export default defineConfig({
     port: 5173,
     allowedHosts: true,
     proxy: {
-      '/login': 'http://localhost:8000',
+      // /login must only proxy POST (GET /login is the frontend login page)
+      '/login': {
+        target: 'http://localhost:8000',
+        bypass: (req) => req.method !== 'POST' ? req.url : null,
+      },
       '/users': 'http://localhost:8000',
       '/detect-corners': 'http://localhost:8000',
       '/upload': 'http://localhost:8000',
       '/documents': 'http://localhost:8000',
       '/my-uploads': 'http://localhost:8000',
       '/my-pages': 'http://localhost:8000',
-      '/admin': 'http://localhost:8000',
-      '/manager': 'http://localhost:8000',
+      // use ^ so only sub-paths are proxied, not the bare /admin or /manager routes
+      '^/admin/': 'http://localhost:8000',
+      '^/manager/': 'http://localhost:8000',
       '/annotation-requests': 'http://localhost:8000',
       '/pages': 'http://localhost:8000',
       '/export': 'http://localhost:8000',
       '/uploads': 'http://localhost:8000',
       '/raw': 'http://localhost:8000',
+      '/folders': 'http://localhost:8000',
     },
   },
 });
