@@ -9,7 +9,6 @@ logger = logging.getLogger(__name__)
 
 REPO_ROOT   = Path(__file__).parent.parent
 _TOKEN_FILE = REPO_ROOT / "gdrive-token.json"
-_ROOT_ID    = os.getenv("GDRIVE_ROOT_FOLDER_ID", "")
 
 _service = None
 _folder_cache: dict[str, str] = {}
@@ -19,7 +18,7 @@ def _get_service():
     global _service
     if _service is not None:
         return _service
-    if not _TOKEN_FILE.exists() or not _ROOT_ID:
+    if not _TOKEN_FILE.exists() or not os.getenv("GDRIVE_ROOT_FOLDER_ID"):
         return None
     try:
         from google.oauth2.credentials import Credentials
@@ -79,7 +78,7 @@ def _do_upload(file_bytes: bytes, relative_path: str) -> None:
     from googleapiclient.http import MediaIoBaseUpload
 
     parts = Path(relative_path).parts
-    parent_id = _ROOT_ID
+    parent_id = os.getenv("GDRIVE_ROOT_FOLDER_ID", "")
     for folder_name in parts[:-1]:
         parent_id = _get_or_create_folder(service, folder_name, parent_id)
 
@@ -104,6 +103,6 @@ def _safe_upload(file_bytes: bytes, relative_path: str) -> None:
 
 def upload_async(file_bytes: bytes, relative_path: str) -> None:
     """Fire-and-forget upload to Drive. Silently skips if not configured."""
-    if not _TOKEN_FILE.exists() or not _ROOT_ID:
+    if not _TOKEN_FILE.exists() or not os.getenv("GDRIVE_ROOT_FOLDER_ID"):
         return
     Thread(target=_safe_upload, args=(file_bytes, relative_path), daemon=True).start()
