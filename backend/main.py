@@ -18,6 +18,7 @@ from PIL import Image, ImageEnhance, ImageOps
 import io
 
 import box_db
+import gdrive
 import schemas
 from auth import (create_token, get_current_user, hash_password,
                   require_admin, require_manager, verify_password)
@@ -402,6 +403,7 @@ async def upload_files(
         raw_dest.mkdir(parents=True, exist_ok=True)
         (raw_dest / fname).write_bytes(raw_bytes)
         raw_image_path = f"{medium}/{cls}/{subject}/{fname}"
+        gdrive.upload_async(raw_bytes, f"raw/{raw_image_path}")
 
         page_corners = all_corners[page_num - 1] if page_num - 1 < len(all_corners) else None
         corners_str  = json.dumps(page_corners) if page_corners is not None else None
@@ -424,6 +426,7 @@ async def upload_files(
 
         file_path.write_bytes(contents)
         image_path = f"{medium}/{cls}/{subject}/{fname}"
+        gdrive.upload_async(contents, f"uploads/{image_path}")
 
         cur.execute(
             """
@@ -898,6 +901,7 @@ async def replace_page_image(page_name: str, file: UploadFile = File(...), corne
     if raw_path:
         raw_path.parent.mkdir(parents=True, exist_ok=True)
         raw_path.write_bytes(raw_bytes)
+        gdrive.upload_async(raw_bytes, f"raw/{row['raw_image_path']}")
 
     # Apply perspective warp if corners provided, then preprocess
     contents = raw_bytes
@@ -911,6 +915,7 @@ async def replace_page_image(page_name: str, file: UploadFile = File(...), corne
     img_path = UPLOADS_DIR / row["image_path"]
     img_path.parent.mkdir(parents=True, exist_ok=True)
     img_path.write_bytes(contents)
+    gdrive.upload_async(contents, f"uploads/{row['image_path']}")
 
     width = height = None
     try:

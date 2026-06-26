@@ -8,3 +8,6 @@ opencv-python-headless
 numpy
 python-jose[cryptography]
 passlib[bcrypt]
+google-api-python-client
+google-auth
+google-auth-oauthlib

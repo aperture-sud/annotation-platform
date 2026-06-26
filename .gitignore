@@ -17,4 +17,9 @@ storage/raw/
 .env
 *.log
 
+# Google Drive secrets
+gdrive-token.json
+gdrive-credentials.json
+oauth-client.json
+
 

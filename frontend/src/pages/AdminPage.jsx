@@ -169,9 +169,11 @@ export default function AdminPage() {
     groupByUser[u.username] || { username: u.username, pending: 0, redo: 0, approved: 0, flagged: 0, uploads: [] }
   );
 
-  const totalPending = allGroups.reduce((s, g) => s + g.pending + (g.redo || 0), 0);
-  const totalFlagged = allGroups.reduce((s, g) => s + g.flagged, 0);
-  const totalRedo    = allGroups.reduce((s, g) => s + (g.redo || 0), 0);
+  const totalPending  = allGroups.reduce((s, g) => s + g.pending + (g.redo || 0), 0);
+  const totalFlagged  = allGroups.reduce((s, g) => s + g.flagged, 0);
+  const totalRedo     = allGroups.reduce((s, g) => s + (g.redo || 0), 0);
+  const totalApproved = allGroups.reduce((s, g) => s + g.approved, 0);
+  const totalUploads  = allGroups.reduce((s, g) => s + g.pending + (g.redo || 0) + g.approved + g.flagged, 0);
   const pendingRequests = requests.filter(r => r.status === 'pending').length;
 
   return (
@@ -328,8 +330,14 @@ export default function AdminPage() {
         {activeTab === 'uploads' && (
           <div>
             <div style={{ ...S.card, borderColor: totalPending + totalRedo > 0 ? '#ffe082' : '#e8e8e8' }}>
-              <h2 style={{ ...S.cardTitle, display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <h2 style={{ ...S.cardTitle, display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                 Image approval
+                <span style={{ fontSize: '12px', fontWeight: 600, backgroundColor: '#f0f0f0', color: '#555', padding: '1px 8px', borderRadius: '10px' }}>
+                  {totalUploads} uploaded
+                </span>
+                <span style={{ fontSize: '12px', fontWeight: 600, backgroundColor: '#e8f5e9', color: '#2e7d32', padding: '1px 8px', borderRadius: '10px' }}>
+                  {totalApproved} approved
+                </span>
                 {totalPending > 0 && (
                   <span style={{ fontSize: '12px', fontWeight: 600, backgroundColor: '#fff8e1', color: '#e65100', padding: '1px 8px', borderRadius: '10px' }}>
                     {totalPending} pending

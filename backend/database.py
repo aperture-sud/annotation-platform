@@ -42,6 +42,7 @@ def init_db():
             folder_id   INTEGER NOT NULL,
             uploaded_by TEXT,
             uploaded_at TIMESTAMP DEFAULT NOW(),
+            page_count  INTEGER NOT NULL DEFAULT 0,
             CONSTRAINT documents_folder_id_fk FOREIGN KEY (folder_id) REFERENCES folders(id)
         );
         CREATE TABLE IF NOT EXISTS pages (
@@ -180,6 +181,42 @@ def init_db():
             IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'annotation_requests_folder_id_fk') THEN
                 ALTER TABLE annotation_requests ADD CONSTRAINT annotation_requests_folder_id_fk
                     FOREIGN KEY (folder_id) REFERENCES folders(id);
+            END IF;
+        END $$;
+    """)
+
+    # page_count column on documents (for existing installs)
+    cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS page_count INTEGER NOT NULL DEFAULT 0")
+
+    # Initialise page_count from actual page rows
+    cur.execute("""
+        UPDATE documents d
+        SET page_count = (SELECT COUNT(*) FROM pages p WHERE p.doc_id = d.id)
+        WHERE page_count = 0
+    """)
+
+    # Trigger to keep page_count in sync
+    cur.execute("""
+        CREATE OR REPLACE FUNCTION _sync_doc_page_count() RETURNS TRIGGER AS $$
+        BEGIN
+            IF TG_OP = 'INSERT' THEN
+                UPDATE documents SET page_count = page_count + 1 WHERE id = NEW.doc_id;
+            ELSIF TG_OP = 'DELETE' THEN
+                UPDATE documents SET page_count = page_count - 1 WHERE id = OLD.doc_id;
+            END IF;
+            RETURN NULL;
+        END;
+        $$ LANGUAGE plpgsql;
+    """)
+    cur.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_trigger WHERE tgname = 'trg_pages_page_count'
+            ) THEN
+                CREATE TRIGGER trg_pages_page_count
+                AFTER INSERT OR DELETE ON pages
+                FOR EACH ROW EXECUTE FUNCTION _sync_doc_page_count();
             END IF;
         END $$;
     """)
