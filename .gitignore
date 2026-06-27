@@ -16,6 +16,8 @@ storage/raw/
 # Misc
 .env
 *.log
+.claude/
+CLAUDE.md
 
 # Google Drive secrets
 gdrive-token.json
