@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
-  getPage, getPageBoxes, createBox, updateBox, deleteBox, exportPage, renamePage,
-  coordsToCoordinates, normalizeBox, IMAGE_BASE_URL,
+  getPage, getPageBoxes, createBox, updateBox, deleteBox, exportPage, exportPageJson, renamePage,
+  coordsToCoordinates, normalizeBox, IMAGE_BASE_URL, MASKED_BASE_URL,
 } from '../api/client.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import ImageCanvas from '../components/ImageCanvas.jsx';
@@ -369,9 +369,24 @@ export default function AnnotatePage() {
     } catch (e) { console.error('Export failed', e); }
   }
 
+  async function handleExportJson() {
+    try {
+      const data = await exportPageJson(pageName);
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `${pageTitle || pageName}.json`; a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) { console.error('JSON export failed', e); }
+  }
+
   const selectedBox = boxes.find((b) => b.id === selectedBoxId) || null;
   const parentOfSelected = selectedBox?.parent_box_id ? boxes.find((b) => b.id === selectedBox.parent_box_id) : null;
-  const imageUrl = page ? `${IMAGE_BASE_URL}/${page.image_path}` : null;
+  const imageUrl = page
+    ? page.masked_image_path
+      ? `${MASKED_BASE_URL}/${page.masked_image_path}`
+      : `${IMAGE_BASE_URL}/${page.image_path}`
+    : null;
 
   return (
     <div style={S.root}>
@@ -445,7 +460,8 @@ export default function AnnotatePage() {
 
         <div style={S.sep} />
 
-        <button className="tb-btn btn-export" onClick={handleExport}>↓ Export</button>
+        <button className="tb-btn btn-export" onClick={handleExport}>↓ Export as TXT</button>
+        <button className="tb-btn btn-export" onClick={handleExportJson}>↓ Export as JSON</button>
       </div>
 
       {/* ── Mode banners ──────────────────────────────────────────────────── */}

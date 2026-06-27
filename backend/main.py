@@ -18,6 +18,7 @@ from PIL import Image, ImageEnhance, ImageOps
 import io
 
 import box_db
+import mask_db
 import gdrive
 import schemas
 from auth import (create_token, get_current_user, hash_password,
@@ -27,8 +28,10 @@ from database import get_conn, init_db
 REPO_ROOT   = Path(__file__).parent.parent
 UPLOADS_DIR = REPO_ROOT / "storage" / "uploads"
 RAW_DIR     = REPO_ROOT / "storage" / "raw"
+MASKED_DIR  = REPO_ROOT / "storage" / "masked"
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 RAW_DIR.mkdir(parents=True, exist_ok=True)
+MASKED_DIR.mkdir(parents=True, exist_ok=True)
 
 VALID_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
@@ -69,7 +72,8 @@ app.add_middleware(
 )
 
 app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
-app.mount("/raw", StaticFiles(directory=str(RAW_DIR)), name="raw")
+app.mount("/raw",     StaticFiles(directory=str(RAW_DIR)),     name="raw")
+app.mount("/masked",  StaticFiles(directory=str(MASKED_DIR)),  name="masked")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -150,7 +154,7 @@ def list_users(_: dict = Depends(require_admin)):
 
 @app.post("/users", status_code=201)
 def create_user(data: schemas.UserCreate, _: dict = Depends(require_admin)):
-    if data.role not in ("pictaker", "annotator", "manager", "admin"):
+    if data.role not in ("pictaker", "annotator", "manager", "admin", "masker"):
         raise HTTPException(400, "Invalid role")
     conn = get_conn()
     cur  = conn.cursor()
@@ -297,7 +301,7 @@ def _next_student_id(cur, folder_id: int, m: str, c: str, s: str) -> int:
 
 def _apply_warp(image_bytes: bytes, corners_norm: list) -> bytes:
     """Clip image to the selected quad, crop to its bounding box, scale to fit
-    within 1240×1754, then pad with white to exactly 1240×1754.
+    within 1240×1754, then pad with black to exactly 1240×1754.
     corners_norm: [TL, TR, BR, BL] each as [fx, fy] in [0, 1].
     """
     nparr = np.frombuffer(image_bytes, np.uint8)
@@ -308,11 +312,10 @@ def _apply_warp(image_bytes: bytes, corners_norm: list) -> bytes:
 
     pts_px = np.array([[c[0] * w, c[1] * h] for c in corners_norm], dtype=np.float32)
 
-    # Mask outside the quad with white
+    # Mask outside the quad with black
     mask = np.zeros((h, w), dtype=np.uint8)
     cv2.fillPoly(mask, [pts_px.astype(np.int32)], 255)
-    white = np.full_like(img, 255)
-    img = np.where(mask[:, :, np.newaxis] == 255, img, white)
+    img = np.where(mask[:, :, np.newaxis] == 255, img, 0)
 
     # Crop to bounding box
     x0 = max(0, int(np.floor(pts_px[:, 0].min())))
@@ -334,7 +337,7 @@ def _apply_warp(image_bytes: bytes, corners_norm: list) -> bytes:
     pad_left   = (target_w - new_w) // 2
     pad_right  = target_w - new_w - pad_left
     result = cv2.copyMakeBorder(scaled, pad_top, pad_bottom, pad_left, pad_right,
-                                cv2.BORDER_CONSTANT, value=(255, 255, 255))
+                                cv2.BORDER_CONSTANT, value=(0, 0, 0))
 
     buf = io.BytesIO()
     Image.fromarray(cv2.cvtColor(result, cv2.COLOR_BGR2RGB)).save(buf, format="JPEG", quality=92, optimize=True)
@@ -554,7 +557,14 @@ def delete_document(doc_name: str, _: dict = Depends(get_current_user)):
                 (RAW_DIR / page["raw_image_path"]).unlink(missing_ok=True)
         except Exception:
             pass
-    # ON DELETE CASCADE removes pages and their boxes
+        try:
+            box_db.delete_page_file(page["page_name"])
+        except Exception:
+            pass
+        try:
+            mask_db.delete_mask_file(page["page_name"])
+        except Exception:
+            pass
     cur.execute("DELETE FROM documents WHERE doc_name = %s", (doc_name,))
     conn.commit()
     cur.close(); conn.close()
@@ -666,14 +676,11 @@ def my_pages(current: dict = Depends(get_current_user)):
     conn = get_conn()
     cur  = conn.cursor()
     cur.execute("""
-        SELECT p.*, COUNT(b.id) AS box_count,
-               d.doc_name, d.uploaded_at, f.medium, f.cls, f.subject
+        SELECT p.*, d.doc_name, d.uploaded_at, f.medium, f.cls, f.subject
         FROM pages p
-        LEFT JOIN boxes b ON b.page_name = p.page_name
         JOIN documents d ON d.id = p.doc_id
         JOIN folders f ON f.id = d.folder_id
         WHERE p.assigned_to = %s
-        GROUP BY p.page_name, d.doc_name, d.uploaded_at, f.medium, f.cls, f.subject
         ORDER BY d.uploaded_at DESC, p.page_number ASC
     """, (current["username"],))
     rows = [dict(r) for r in cur.fetchall()]
@@ -736,6 +743,7 @@ def approve_annotation_request(req_id: int, current: dict = Depends(get_current_
         SELECT p.page_name FROM pages p
         JOIN documents d ON d.id = p.doc_id
         WHERE d.folder_id = %s AND p.assigned_to IS NULL AND p.upload_approval_status = 'approved'
+          AND (p.masking_status IS NULL OR p.masking_area = 'approved')
         ORDER BY d.uploaded_at ASC, p.page_number ASC
         LIMIT %s
     """, (req["folder_id"], req["quantity"]))
@@ -779,6 +787,266 @@ def reject_annotation_request(req_id: int, current: dict = Depends(get_current_u
     return updated
 
 
+# ── Masking requests ─────────────────────────────────────────────────────────
+
+@app.post("/masking-requests", status_code=201)
+def create_masking_request(body: schemas.MaskingRequestCreate, current: dict = Depends(get_current_user)):
+    if current["role"] != "masker":
+        raise HTTPException(403, "Maskers only")
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO masking_requests (requested_by, quantity) VALUES (%s, %s) RETURNING *",
+        (current["username"], body.quantity),
+    )
+    row = dict(cur.fetchone())
+    conn.commit(); cur.close(); conn.close()
+    return row
+
+
+@app.get("/masking-requests")
+def get_masking_requests(current: dict = Depends(get_current_user)):
+    conn = get_conn(); cur = conn.cursor()
+    if current["role"] == "masker":
+        cur.execute(
+            "SELECT * FROM masking_requests WHERE requested_by = %s ORDER BY created_at DESC",
+            (current["username"],),
+        )
+    elif current["role"] == "admin":
+        cur.execute("SELECT * FROM masking_requests ORDER BY created_at DESC")
+    else:
+        raise HTTPException(403, "Not allowed")
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close(); conn.close()
+    return rows
+
+
+@app.patch("/masking-requests/{req_id}/approve")
+def approve_masking_request(req_id: int, current: dict = Depends(get_current_user)):
+    if current["role"] != "admin":
+        raise HTTPException(403, "Admin only")
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("SELECT * FROM masking_requests WHERE id = %s", (req_id,))
+    req = cur.fetchone()
+    if not req:
+        cur.close(); conn.close(); raise HTTPException(404, "Request not found")
+    req = dict(req)
+    if req["status"] != "pending":
+        cur.close(); conn.close(); raise HTTPException(400, "Already reviewed")
+
+    cur.execute("""
+        SELECT p.page_name FROM pages p
+        JOIN documents d ON d.id = p.doc_id
+        WHERE p.upload_approval_status = 'approved'
+          AND p.masking_status IS NULL
+        ORDER BY d.uploaded_at ASC NULLS LAST
+        LIMIT %s
+    """, (req["quantity"],))
+    pages = [r["page_name"] for r in cur.fetchall()]
+
+    if pages:
+        cur.execute(
+            "UPDATE pages SET masking_status = 'assigned', masked_by = %s WHERE page_name = ANY(%s)",
+            (req["requested_by"], pages),
+        )
+
+    cur.execute("""
+        UPDATE masking_requests
+        SET status = 'approved', reviewed_by = %s, reviewed_at = NOW(), fulfilled = %s
+        WHERE id = %s RETURNING *
+    """, (current["username"], len(pages), req_id))
+    updated = dict(cur.fetchone())
+    conn.commit(); cur.close(); conn.close()
+    return updated
+
+
+@app.patch("/masking-requests/{req_id}/reject")
+def reject_masking_request(req_id: int, current: dict = Depends(get_current_user)):
+    if current["role"] != "admin":
+        raise HTTPException(403, "Admin only")
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("SELECT status FROM masking_requests WHERE id = %s", (req_id,))
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close(); raise HTTPException(404, "Request not found")
+    if dict(row)["status"] != "pending":
+        cur.close(); conn.close(); raise HTTPException(400, "Already reviewed")
+    cur.execute(
+        "UPDATE masking_requests SET status = 'rejected', reviewed_by = %s, reviewed_at = NOW() WHERE id = %s RETURNING *",
+        (current["username"], req_id),
+    )
+    updated = dict(cur.fetchone())
+    conn.commit(); cur.close(); conn.close()
+    return updated
+
+
+@app.get("/my-masking-pages")
+def my_masking_pages(current: dict = Depends(get_current_user)):
+    if current["role"] != "masker":
+        raise HTTPException(403, "Maskers only")
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("""
+        SELECT p.page_name, p.image_path, p.masked_image_path, p.masking_status,
+               p.masking_area, p.masking_review_note,
+               p.width, p.height, f.medium, f.cls, f.subject, d.doc_name
+        FROM pages p
+        JOIN documents d ON d.id = p.doc_id
+        JOIN folders f ON f.id = d.folder_id
+        WHERE p.masked_by = %s
+        ORDER BY d.uploaded_at ASC, p.page_number ASC
+    """, (current["username"],))
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close(); conn.close()
+    return rows
+
+
+@app.get("/pages/{page_name}/mask-boxes")
+def get_mask_boxes(page_name: str, current: dict = Depends(get_current_user)):
+    if current["role"] not in ("masker", "admin", "manager"):
+        raise HTTPException(403, "Not allowed")
+    _require_page(page_name)
+    return mask_db.get_mask_boxes(page_name)
+
+
+@app.post("/pages/{page_name}/save-masks")
+def save_masks(page_name: str, body: schemas.SaveMasks, current: dict = Depends(get_current_user)):
+    if current["role"] not in ("masker", "admin"):
+        raise HTTPException(403, "Not allowed")
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("SELECT masked_by FROM pages WHERE page_name = %s", (page_name,))
+    row = cur.fetchone()
+    cur.close(); conn.close()
+    if not row:
+        raise HTTPException(404, "Page not found")
+    if current["role"] == "masker" and dict(row)["masked_by"] != current["username"]:
+        raise HTTPException(403, "Not assigned to you")
+    shapes = [{"points": [{"x": p.x, "y": p.y} for p in s.points]} for s in body.shapes]
+    mask_db.set_mask_boxes(page_name, shapes)
+    return {"saved": len(shapes)}
+
+
+@app.post("/pages/{page_name}/apply-masks")
+def apply_masks(page_name: str, body: schemas.ApplyMasks, current: dict = Depends(get_current_user)):
+    if current["role"] not in ("masker", "admin"):
+        raise HTTPException(403, "Not allowed")
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("""
+        SELECT p.image_path, p.masked_by, p.masking_status, p.masking_area,
+               f.medium, f.cls, f.subject
+        FROM pages p
+        JOIN documents d ON d.id = p.doc_id
+        JOIN folders f ON f.id = d.folder_id
+        WHERE p.page_name = %s
+    """, (page_name,))
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close(); raise HTTPException(404, "Page not found")
+    row = dict(row)
+    if current["role"] == "masker" and row["masked_by"] != current["username"]:
+        cur.close(); conn.close(); raise HTTPException(403, "Not assigned to you")
+    # Allow redo only when sent back; block if already pending/approved
+    if row["masking_area"] in ("pending_approval", "approved"):
+        cur.close(); conn.close(); raise HTTPException(400, "Already submitted for review")
+
+    # Load original processed image
+    img_path = UPLOADS_DIR / row["image_path"]
+    if not img_path.exists():
+        cur.close(); conn.close(); raise HTTPException(404, "Source image not found")
+
+    nparr = np.frombuffer(img_path.read_bytes(), np.uint8)
+    img   = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img is None:
+        cur.close(); conn.close(); raise HTTPException(500, "Could not decode image")
+
+    h, w = img.shape[:2]
+    for shape in body.shapes:
+        pts = np.array(
+            [[max(0, min(w, int(round(p.x)))), max(0, min(h, int(round(p.y))))] for p in shape.points],
+            dtype=np.int32
+        )
+        if len(pts) >= 3:
+            cv2.fillPoly(img, [pts], (0, 0, 0))
+
+    # Save masked image
+    dest_dir = MASKED_DIR / row["medium"] / row["cls"] / row["subject"]
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    fname = Path(row["image_path"]).name
+    out_path = dest_dir / fname
+    buf = io.BytesIO()
+    Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)).save(buf, format="JPEG", quality=92, optimize=True)
+    out_path.write_bytes(buf.getvalue())
+
+    masked_image_path = f"{row['medium']}/{row['cls']}/{row['subject']}/{fname}"
+    shapes_data = [{"points": [{"x": p.x, "y": p.y} for p in s.points]} for s in body.shapes]
+    mask_db.set_mask_boxes(page_name, shapes_data)
+    cur.execute("""
+        UPDATE pages SET masking_status = 'done', masked_image_path = %s,
+                         masking_area = 'pending_approval', masking_review_note = NULL
+        WHERE page_name = %s
+    """, (masked_image_path, page_name))
+    conn.commit(); cur.close(); conn.close()
+    return {"masked_image_path": masked_image_path}
+
+
+@app.get("/manager/masking-pages")
+def manager_masking_pages(current: dict = Depends(get_current_user)):
+    if current["role"] not in ("manager", "admin"):
+        raise HTTPException(403, "Not allowed")
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("""
+        SELECT p.page_name, p.image_path, p.masked_image_path, p.masking_area,
+               p.masking_review_note, p.masking_reviewed_by, p.masked_by,
+               f.medium, f.cls, f.subject
+        FROM pages p
+        JOIN documents d ON d.id = p.doc_id
+        JOIN folders f ON f.id = d.folder_id
+        WHERE p.masking_area IS NOT NULL
+        ORDER BY p.masking_area, d.uploaded_at ASC, p.page_number ASC
+    """)
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close(); conn.close()
+    return rows
+
+
+@app.patch("/manager/masking-pages/{page_name}/approve")
+def approve_masking(page_name: str, current: dict = Depends(get_current_user)):
+    if current["role"] not in ("manager", "admin"):
+        raise HTTPException(403, "Not allowed")
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("SELECT masking_area FROM pages WHERE page_name = %s", (page_name,))
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close(); raise HTTPException(404, "Page not found")
+    cur.execute("""
+        UPDATE pages SET masking_area = 'approved', masking_reviewed_by = %s,
+                         masking_review_note = NULL
+        WHERE page_name = %s
+        RETURNING page_name, masking_area, masking_reviewed_by
+    """, (current["username"], page_name))
+    updated = dict(cur.fetchone())
+    conn.commit(); cur.close(); conn.close()
+    return updated
+
+
+@app.patch("/manager/masking-pages/{page_name}/send-back")
+def sendback_masking(page_name: str, body: schemas.ReviewAction, current: dict = Depends(get_current_user)):
+    if current["role"] not in ("manager", "admin"):
+        raise HTTPException(403, "Not allowed")
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("SELECT masking_area FROM pages WHERE page_name = %s", (page_name,))
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close(); raise HTTPException(404, "Page not found")
+    cur.execute("""
+        UPDATE pages SET masking_area = 'needs_rework', masking_review_note = %s,
+                         masking_reviewed_by = %s, masking_status = 'assigned'
+        WHERE page_name = %s
+        RETURNING page_name, masking_area, masking_review_note, masking_reviewed_by
+    """, (body.note, current["username"], page_name))
+    updated = dict(cur.fetchone())
+    conn.commit(); cur.close(); conn.close()
+    return updated
+
+
 # ── Pages ─────────────────────────────────────────────────────────────────────
 
 @app.get("/pages/{page_name}")
@@ -802,6 +1070,7 @@ def get_page(page_name: str, _: dict = Depends(get_current_user)):
         "document_display_name": row["doc_name"],
         "page_number":           row["page_number"],
         "image_path":            row["image_path"],
+        "masked_image_path":     row.get("masked_image_path"),
         "width":                 row["width"],
         "height":                row["height"],
         "status":                row["area"],
@@ -834,9 +1103,14 @@ def rename_page(page_name: str, payload: schemas.PageRename, _: dict = Depends(g
             (UPLOADS_DIR / conflict["image_path"]).unlink(missing_ok=True)
         except Exception:
             pass
+        try:
+            box_db.delete_page_file(new_name)
+        except Exception:
+            pass
         cur.execute("DELETE FROM pages WHERE page_name = %s", (new_name,))
 
-    # ON UPDATE CASCADE propagates new page_name to boxes.page_name
+    box_db.rename_page(page_name, new_name)
+    mask_db.rename_page(page_name, new_name)
     cur.execute("UPDATE pages SET page_name = %s WHERE page_name = %s", (new_name, page_name))
     conn.commit()
     cur.close(); conn.close()
@@ -968,6 +1242,14 @@ def delete_page(page_name: str, current: dict = Depends(get_current_user)):
             (RAW_DIR / row["raw_image_path"]).unlink(missing_ok=True)
     except Exception:
         pass
+    try:
+        box_db.delete_page_file(page_name)
+    except Exception:
+        pass
+    try:
+        mask_db.delete_mask_file(page_name)
+    except Exception:
+        pass
     cur.execute("DELETE FROM pages WHERE page_name = %s", (page_name,))
     conn.commit()
     cur.close(); conn.close()
@@ -1063,15 +1345,12 @@ def manager_pages(current: dict = Depends(require_manager)):
     conn = get_conn()
     cur  = conn.cursor()
     cur.execute("""
-        SELECT p.*, COUNT(b.id) AS box_count,
-               d.doc_name, d.uploaded_at, d.uploaded_by, f.medium, f.cls, f.subject
+        SELECT p.*, d.doc_name, d.uploaded_at, d.uploaded_by, f.medium, f.cls, f.subject
         FROM pages p
-        LEFT JOIN boxes b ON b.page_name = p.page_name
         JOIN documents d ON d.id = p.doc_id
         JOIN folders f ON f.id = d.folder_id
         WHERE p.assigned_to IS NOT NULL
           AND p.area IN ('pending_approval', 'approved', 'needs_rework', 'flagged_admin')
-        GROUP BY p.page_name, d.doc_name, d.uploaded_at, d.uploaded_by, f.medium, f.cls, f.subject
         ORDER BY d.uploaded_at DESC, p.page_number ASC
     """)
     rows = [dict(r) for r in cur.fetchall()]
@@ -1507,3 +1786,24 @@ def export_page(page_name: str, _: dict = Depends(get_current_user)):
     return (f"\\begin{{page}}{{{page_number}}}\n\n"
             f"{inner}\n\n"
             f"\\end{{page}}")
+
+
+@app.get("/export/{page_name}/json")
+def export_page_json(page_name: str, _: dict = Depends(get_current_user)):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT p.page_name, p.page_number, p.image_path, p.width, p.height,
+               f.medium, f.cls, f.subject, d.doc_name
+        FROM pages p
+        JOIN documents d ON d.id = p.doc_id
+        JOIN folders f ON f.id = d.folder_id
+        WHERE p.page_name = %s
+    """, (page_name,))
+    row = cur.fetchone()
+    cur.close(); conn.close()
+    if not row:
+        raise HTTPException(404, "Page not found")
+    result = dict(row)
+    result["boxes"] = box_db.get_boxes(page_name)
+    return result

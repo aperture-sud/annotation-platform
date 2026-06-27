@@ -63,3 +63,24 @@ class ReviewAction(BaseModel):
 class UploadApprovalAction(BaseModel):
     note: Optional[str] = None
     model_config = {"extra": "ignore"}
+
+
+class MaskingRequestCreate(BaseModel):
+    quantity: int
+    model_config = {"extra": "ignore"}
+
+
+class MaskPoint(BaseModel):
+    x: float
+    y: float
+
+class MaskShape(BaseModel):
+    points: list[MaskPoint]
+
+class ApplyMasks(BaseModel):
+    shapes: list[MaskShape]
+    model_config = {"extra": "ignore"}
+
+class SaveMasks(BaseModel):
+    shapes: list[MaskShape]
+    model_config = {"extra": "ignore"}

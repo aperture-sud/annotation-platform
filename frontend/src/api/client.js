@@ -22,8 +22,9 @@ API.interceptors.response.use(
   }
 );
 
-export const IMAGE_BASE_URL = `${BACKEND}/uploads`;
-export const RAW_BASE_URL   = `${BACKEND}/raw`;
+export const IMAGE_BASE_URL   = `${BACKEND}/uploads`;
+export const RAW_BASE_URL     = `${BACKEND}/raw`;
+export const MASKED_BASE_URL  = `${BACKEND}/masked`;
 
 function _isRect(pts) {
   if (pts.length !== 4) return false;
@@ -237,6 +238,11 @@ export async function exportPage(pageName) {
   return data;
 }
 
+export async function exportPageJson(pageName) {
+  const { data } = await API.get(`/export/${encodeURIComponent(pageName)}/json`);
+  return data;
+}
+
 export async function getMyPages() {
   const { data } = await API.get('/my-pages');
   return data;
@@ -309,5 +315,60 @@ export async function flagUpload(pageName, note) {
 
 export async function unflagUpload(pageName) {
   const { data } = await API.patch(`/admin/pages/${encodeURIComponent(pageName)}/unflag-upload`);
+  return data;
+}
+
+export async function getMaskingRequests() {
+  const { data } = await API.get('/masking-requests');
+  return data;
+}
+
+export async function createMaskingRequest(quantity) {
+  const { data } = await API.post('/masking-requests', { quantity });
+  return data;
+}
+
+export async function approveMaskingRequest(id) {
+  const { data } = await API.patch(`/masking-requests/${id}/approve`);
+  return data;
+}
+
+export async function rejectMaskingRequest(id) {
+  const { data } = await API.patch(`/masking-requests/${id}/reject`);
+  return data;
+}
+
+export async function getMyMaskingPages() {
+  const { data } = await API.get('/my-masking-pages');
+  return data;
+}
+
+export async function getMaskBoxes(pageName) {
+  const { data } = await API.get(`/pages/${encodeURIComponent(pageName)}/mask-boxes`);
+  return data;
+}
+
+export async function saveMasks(pageName, shapes) {
+  const { data } = await API.post(`/pages/${encodeURIComponent(pageName)}/save-masks`, { shapes });
+  return data;
+}
+
+export async function applyMasks(pageName, shapes) {
+  const { data } = await API.post(`/pages/${encodeURIComponent(pageName)}/apply-masks`, { shapes });
+  return data;
+}
+
+export async function getManagerMaskingPages() {
+  const { data } = await API.get('/manager/masking-pages');
+  return data;
+}
+
+export async function approveMaskingPage(pageName) {
+  const { data } = await API.patch(`/manager/masking-pages/${encodeURIComponent(pageName)}/approve`);
+  return data;
+}
+
+export async function sendBackMaskingPage(pageName, note) {
+  const { data } = await API.patch(`/manager/masking-pages/${encodeURIComponent(pageName)}/send-back`, { note });
   return data;
 }

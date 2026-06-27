@@ -26,7 +26,7 @@ def init_db():
             id            SERIAL PRIMARY KEY,
             username      TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
-            role          TEXT NOT NULL CHECK (role IN ('pictaker','annotator','manager','admin')),
+            role          TEXT NOT NULL CHECK (role IN ('pictaker','annotator','manager','admin','masker')),
             created_at    TIMESTAMP DEFAULT NOW()
         );
         CREATE TABLE IF NOT EXISTS folders (
@@ -63,17 +63,15 @@ def init_db():
             upload_approval_note   TEXT,
             CONSTRAINT pages_doc_id_fk FOREIGN KEY (doc_id) REFERENCES documents(id) ON DELETE CASCADE
         );
-        CREATE TABLE IF NOT EXISTS boxes (
-            id             SERIAL PRIMARY KEY,
-            page_name      TEXT NOT NULL,
-            parent_id      INTEGER,
-            coordinates    TEXT NOT NULL DEFAULT '[]',
-            tag_category   TEXT,
-            tag_attributes TEXT,
-            content_text   TEXT,
-            reading_order  INTEGER,
-            confidence     TEXT,
-            created_at     TIMESTAMP DEFAULT NOW()
+        CREATE TABLE IF NOT EXISTS masking_requests (
+            id           SERIAL PRIMARY KEY,
+            requested_by TEXT NOT NULL,
+            quantity     INTEGER NOT NULL CHECK (quantity > 0),
+            status       TEXT NOT NULL DEFAULT 'pending',
+            fulfilled    INTEGER NOT NULL DEFAULT 0,
+            created_at   TIMESTAMP DEFAULT NOW(),
+            reviewed_by  TEXT,
+            reviewed_at  TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS annotation_requests (
             id           SERIAL PRIMARY KEY,
@@ -92,6 +90,16 @@ def init_db():
         );
     """)
 
+    # Widen role check to include masker on existing installs
+    cur.execute("""
+        DO $$
+        BEGIN
+            ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
+            ALTER TABLE users ADD CONSTRAINT users_role_check
+                CHECK (role IN ('pictaker','annotator','manager','admin','masker'));
+        END $$;
+    """)
+
     # Add new columns to existing installs
     for col_def in [
         "doc_id                 INTEGER",
@@ -107,6 +115,12 @@ def init_db():
         "reviewed_at            TIMESTAMP",
         "upload_approval_status TEXT NOT NULL DEFAULT 'pending'",
         "upload_approval_note   TEXT",
+        "masking_status         TEXT",
+        "masked_by              TEXT",
+        "masked_image_path      TEXT",
+        "masking_area           TEXT",
+        "masking_review_note    TEXT",
+        "masking_reviewed_by    TEXT",
     ]:
         cur.execute(f"ALTER TABLE pages ADD COLUMN IF NOT EXISTS {col_def}")
 
@@ -227,24 +241,8 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_pages_assigned_to ON pages(assigned_to)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_documents_folder_id ON documents(folder_id)")
 
-    # Ensure FK with ON DELETE CASCADE + ON UPDATE CASCADE for boxes
-    cur.execute("""
-        DO $$
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 FROM pg_constraint WHERE conname = 'boxes_page_name_fk'
-            ) THEN
-                ALTER TABLE boxes DROP CONSTRAINT IF EXISTS boxes_page_name_fkey;
-                ALTER TABLE boxes ADD CONSTRAINT boxes_page_name_fk
-                    FOREIGN KEY (page_name) REFERENCES pages(page_name)
-                    ON DELETE CASCADE ON UPDATE CASCADE;
-                ALTER TABLE boxes DROP CONSTRAINT IF EXISTS boxes_parent_id_fkey;
-                ALTER TABLE boxes ADD CONSTRAINT boxes_parent_id_fk
-                    FOREIGN KEY (parent_id) REFERENCES boxes(id)
-                    ON DELETE CASCADE;
-            END IF;
-        END $$;
-    """)
+    # Drop legacy boxes table if it exists from a prior install
+    cur.execute("DROP TABLE IF EXISTS boxes CASCADE")
 
     conn.commit()
     cur.close()

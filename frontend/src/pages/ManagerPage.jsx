@@ -2,7 +2,8 @@ import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   getManagerPages, approveManagerPage, sendBackPage, flagAdminPage,
-  IMAGE_BASE_URL as IMAGE_BASE,
+  getManagerMaskingPages, approveMaskingPage, sendBackMaskingPage,
+  IMAGE_BASE_URL as IMAGE_BASE, MASKED_BASE_URL as MASKED_BASE,
 } from '../api/client.js';
 import { useAuth } from '../context/AuthContext.jsx';
 
@@ -23,27 +24,36 @@ const TABS = [
   { key: 'needs_rework',        label: 'Sent back' },
   { key: 'flagged_admin',       label: 'Flagged for admin' },
   { key: 'approved',            label: 'Approved' },
+  { key: 'masking',             label: 'Masking' },
 ];
 
 export default function ManagerPage() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
 
-  const [pages,   setPages]   = useState([]);
-  const [tab,     setTab]     = useState('approve_annotations');
-  const [loading, setLoading] = useState(true);
+  const [pages,        setPages]        = useState([]);
+  const [maskingPages, setMaskingPages] = useState([]);
+  const [tab,          setTab]          = useState('approve_annotations');
+  const [loading,      setLoading]      = useState(true);
   const [activeRemark, setActiveRemark] = useState(null);
-  const [acting,  setActing]  = useState(false);
+  const [acting,       setActing]       = useState(false);
 
   const [expandedAnnotator, setExpandedAnnotator] = useState(null);
-  const [modal,     setModal]     = useState(null);
-  const [modalNote, setModalNote] = useState('');
+  const [modal,        setModal]     = useState(null);
+  const [modalNote,    setModalNote] = useState('');
+  const [maskModal,    setMaskModal] = useState(null);
+  const [maskNote,     setMaskNote]  = useState('');
 
   useEffect(() => { load(); }, []);
 
   async function load() {
     try {
-      setPages(await getManagerPages());
+      const [pg, mp] = await Promise.all([
+        getManagerPages().catch(() => []),
+        getManagerMaskingPages().catch(() => []),
+      ]);
+      setPages(pg);
+      setMaskingPages(mp);
     } catch (e) {
       console.error(e);
     } finally {
@@ -128,6 +138,34 @@ export default function ManagerPage() {
     }
   }
 
+  // ── Masking review actions ────────────────────────────────────────────────
+
+  async function maskApprove() {
+    setActing(true);
+    try {
+      const updated = await approveMaskingPage(maskModal.page_name);
+      setMaskingPages(prev => prev.map(p => p.page_name === maskModal.page_name ? { ...p, ...updated } : p));
+      setMaskModal(null);
+    } catch (e) {
+      alert(e.response?.data?.detail || 'Failed.');
+    } finally {
+      setActing(false);
+    }
+  }
+
+  async function maskSendBack() {
+    setActing(true);
+    try {
+      const updated = await sendBackMaskingPage(maskModal.page_name, maskNote);
+      setMaskingPages(prev => prev.map(p => p.page_name === maskModal.page_name ? { ...p, ...updated } : p));
+      setMaskModal(null); setMaskNote('');
+    } catch (e) {
+      alert(e.response?.data?.detail || 'Failed.');
+    } finally {
+      setActing(false);
+    }
+  }
+
   // ── Derived data ──────────────────────────────────────────────────────────
 
   const annotatorGroups = useMemo(() => {
@@ -143,8 +181,85 @@ export default function ManagerPage() {
 
   const visible = tab !== 'approve_annotations' ? pages.filter(p => p.area === tab) : [];
 
+  const maskAreaStyle = {
+    pending_approval: { bg: '#fff8e1', color: '#e65100', label: 'Pending' },
+    needs_rework:     { bg: '#fce4ec', color: '#b71c1c', label: 'Rework' },
+    approved:         { bg: '#e8f5e9', color: '#1b5e20', label: 'Approved' },
+  };
+
   return (
     <div style={{ minHeight: '100vh', backgroundColor: '#f5f6f8' }}>
+
+      {/* Masking review modal */}
+      {maskModal && (
+        <div
+          style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.72)', zIndex: 1010, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px' }}
+          onClick={() => { if (!acting) { setMaskModal(null); setMaskNote(''); } }}
+        >
+          <div
+            style={{ backgroundColor: '#fff', borderRadius: '14px', padding: '22px', width: '100%', maxWidth: '560px', display: 'flex', flexDirection: 'column', gap: '14px', maxHeight: '90vh', overflowY: 'auto' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px' }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: '15px', fontWeight: 700, color: '#1a1a1a' }}>{maskModal.page_name}</div>
+                <div style={{ fontSize: '12px', color: '#888', marginTop: '2px' }}>masked by {maskModal.masked_by}</div>
+              </div>
+              {maskAreaStyle[maskModal.masking_area] && (
+                <span style={{ fontSize: '11px', padding: '3px 10px', borderRadius: '10px', fontWeight: 600, backgroundColor: maskAreaStyle[maskModal.masking_area].bg, color: maskAreaStyle[maskModal.masking_area].color }}>
+                  {maskAreaStyle[maskModal.masking_area].label}
+                </span>
+              )}
+            </div>
+
+            {maskModal.masking_review_note && (
+              <div style={{ backgroundColor: '#fff8e1', borderRadius: '6px', padding: '10px 12px', fontSize: '12px', color: '#e65100' }}>
+                <span style={{ fontWeight: 600 }}>Previous remark: </span>{maskModal.masking_review_note}
+              </div>
+            )}
+
+            <img
+              src={maskModal.masked_image_path
+                ? `${MASKED_BASE}/${maskModal.masked_image_path}`
+                : `${IMAGE_BASE}/${maskModal.image_path}`}
+              alt={maskModal.page_name}
+              style={{ width: '100%', borderRadius: '8px', border: '1px solid #e0e0e0', display: 'block' }}
+              onError={e => { e.target.style.display = 'none'; }}
+            />
+
+            {maskModal.masking_area !== 'approved' && (
+              <div>
+                <label style={{ fontSize: '12px', color: '#666', display: 'block', marginBottom: '4px' }}>
+                  Remark (optional — shown to masker)
+                </label>
+                <textarea
+                  value={maskNote}
+                  onChange={e => setMaskNote(e.target.value)}
+                  placeholder="e.g. ID number still visible on top right"
+                  style={{ width: '100%', padding: '8px 10px', fontSize: '13px', border: '1px solid #ddd', borderRadius: '6px', boxSizing: 'border-box', resize: 'vertical', minHeight: '56px', fontFamily: 'inherit' }}
+                />
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+              <button onClick={() => { setMaskModal(null); setMaskNote(''); }} disabled={acting}
+                style={{ padding: '8px 14px', border: '1px solid #ddd', borderRadius: '6px', background: 'none', color: '#555', cursor: 'pointer', fontSize: '13px' }}>
+                Cancel
+              </button>
+              {maskModal.masking_area !== 'approved' && <>
+                <button onClick={maskSendBack} disabled={acting}
+                  style={{ padding: '8px 14px', border: '1px solid #ffcc80', borderRadius: '6px', background: 'none', color: '#e65100', cursor: 'pointer', fontSize: '13px', fontWeight: 600 }}>
+                  {acting ? '…' : 'Send back'}
+                </button>
+                <button onClick={maskApprove} disabled={acting}
+                  style={{ padding: '8px 14px', border: 'none', borderRadius: '6px', backgroundColor: '#2e7d32', color: '#fff', cursor: 'pointer', fontSize: '13px', fontWeight: 600 }}>
+                  {acting ? '…' : 'Approve'}
+                </button>
+              </>}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Annotation review modal */}
       {modal && (
@@ -243,6 +358,8 @@ export default function ManagerPage() {
           {TABS.map(t => {
             const count = t.key === 'approve_annotations'
               ? pages.filter(p => p.area === 'pending_approval').length
+              : t.key === 'masking'
+              ? maskingPages.filter(p => p.masking_area === 'pending_approval').length
               : pages.filter(p => p.area === t.key).length;
             return (
               <button key={t.key} onClick={() => setTab(t.key)}
@@ -353,6 +470,47 @@ export default function ManagerPage() {
             )}
           </div>
         )}
+
+        {/* ── Masking tab ── */}
+        {tab === 'masking' && (() => {
+          const pending  = maskingPages.filter(p => p.masking_area === 'pending_approval');
+          const rework   = maskingPages.filter(p => p.masking_area === 'needs_rework');
+          const approved = maskingPages.filter(p => p.masking_area === 'approved');
+          const grouped  = [
+            { label: 'Pending review', pages: pending, border: '#ffcc80', bg: '#fff8e1', color: '#e65100' },
+            { label: 'Needs rework',   pages: rework,  border: '#ef9a9a', bg: '#fce4ec', color: '#b71c1c' },
+            { label: 'Approved',       pages: approved, border: '#a5d6a7', bg: '#e8f5e9', color: '#1b5e20' },
+          ].filter(g => g.pages.length > 0);
+          if (loading) return <div style={S.card}><p style={S.muted}>Loading…</p></div>;
+          if (grouped.length === 0) return <div style={S.card}><p style={S.muted}>No masking submissions yet.</p></div>;
+          return grouped.map(g => (
+            <div key={g.label} style={{ ...S.card, borderColor: g.border, marginBottom: '12px' }}>
+              <div style={{ fontSize: '13px', fontWeight: 600, color: g.color, marginBottom: '12px' }}>
+                {g.label} ({g.pages.length})
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                {g.pages.map(p => (
+                  <div
+                    key={p.page_name}
+                    style={{ width: '88px', cursor: 'pointer', borderRadius: '8px', overflow: 'hidden', border: `2px solid ${g.border}`, backgroundColor: '#fff' }}
+                    onClick={() => { setMaskModal(p); setMaskNote(''); }}
+                  >
+                    <img
+                      src={p.masked_image_path ? `${MASKED_BASE}/${p.masked_image_path}` : `${IMAGE_BASE}/${p.image_path}`}
+                      alt={p.page_name}
+                      style={{ width: '100%', height: '110px', objectFit: 'cover', display: 'block' }}
+                      onError={e => { e.target.style.display = 'none'; }}
+                    />
+                    <div style={{ padding: '4px 6px 6px' }}>
+                      <div style={{ fontSize: '10px', color: '#555', wordBreak: 'break-all', lineHeight: '1.3' }}>{p.page_name}</div>
+                      <div style={{ fontSize: '9px', color: '#aaa', marginTop: '2px' }}>{p.masked_by}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ));
+        })()}
 
       </div>
     </div>
